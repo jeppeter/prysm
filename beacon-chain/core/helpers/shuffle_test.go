@@ -1,0 +1,139 @@
+package helpers
+
+import (
+	"fmt"
+	"reflect"
+	"testing"
+
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/testing/assert"
+	"github.com/OffchainLabs/prysm/v7/testing/require"
+)
+
+func TestShuffleList_InvalidValidatorCount(t *testing.T) {
+	ClearCache()
+
+	maxShuffleListSize = 20
+	list := make([]primitives.ValidatorIndex, 21)
+	if _, err := ShuffleList(list, [32]byte{123, 125}); err == nil {
+		t.Error("Shuffle should have failed when validator count exceeds ModuloBias")
+		maxShuffleListSize = 1 << 40
+	}
+	maxShuffleListSize = 1 << 40
+}
+
+func TestShuffleList_OK(t *testing.T) {
+	ClearCache()
+
+	var list1 []primitives.ValidatorIndex
+	seed1 := [32]byte{1, 128, 12}
+	seed2 := [32]byte{2, 128, 12}
+	for i := range 10 {
+		list1 = append(list1, primitives.ValidatorIndex(i))
+	}
+
+	list2 := make([]primitives.ValidatorIndex, len(list1))
+	copy(list2, list1)
+
+	list1, err := ShuffleList(list1, seed1)
+	assert.NoError(t, err, "Shuffle failed with")
+
+	list2, err = ShuffleList(list2, seed2)
+	assert.NoError(t, err, "Shuffle failed with")
+
+	if reflect.DeepEqual(list1, list2) {
+		t.Errorf("2 shuffled lists shouldn't be equal")
+	}
+	assert.DeepEqual(t, []primitives.ValidatorIndex{0, 7, 8, 6, 3, 9, 4, 5, 2, 1}, list1, "List 1 was incorrectly shuffled got")
+	assert.DeepEqual(t, []primitives.ValidatorIndex{0, 5, 2, 1, 6, 8, 7, 3, 4, 9}, list2, "List 2 was incorrectly shuffled got")
+}
+
+func TestShuffleList_Vs_ShuffleIndex(t *testing.T) {
+	ClearCache()
+
+	var list []primitives.ValidatorIndex
+	listSize := uint64(1000)
+	seed := [32]byte{123, 42}
+	for i := primitives.ValidatorIndex(0); uint64(i) < listSize; i++ {
+		list = append(list, i)
+	}
+	shuffledListByIndex := make([]primitives.ValidatorIndex, listSize)
+	for i := primitives.ValidatorIndex(0); uint64(i) < listSize; i++ {
+		si, err := ShuffledIndex(i, listSize, seed)
+		assert.NoError(t, err)
+		shuffledListByIndex[si] = i
+	}
+	shuffledList, err := ShuffleList(list, seed)
+	require.NoError(t, err, "Shuffled list error")
+	assert.DeepEqual(t, shuffledListByIndex, shuffledList, "Shuffled lists ar not equal")
+}
+
+func BenchmarkShuffledIndex(b *testing.B) {
+	listSizes := []uint64{4000000, 40000, 400}
+	seed := [32]byte{123, 42}
+	for _, listSize := range listSizes {
+		b.Run(fmt.Sprintf("ShuffledIndex_%d", listSize), func(ib *testing.B) {
+			for i := uint64(0); i < uint64(ib.N); i++ {
+				_, err := ShuffledIndex(primitives.ValidatorIndex(i%listSize), listSize, seed)
+				assert.NoError(b, err)
+			}
+		})
+	}
+}
+
+func BenchmarkIndexComparison(b *testing.B) {
+	listSizes := []uint64{400000, 40000, 400}
+	seed := [32]byte{123, 42}
+	for _, listSize := range listSizes {
+		b.Run(fmt.Sprintf("Indexwise_ShuffleList_%d", listSize), func(ib *testing.B) {
+			for ib.Loop() {
+				// Simulate a list-shuffle by running shuffle-index listSize times.
+				for j := primitives.ValidatorIndex(0); uint64(j) < listSize; j++ {
+					_, err := ShuffledIndex(j, listSize, seed)
+					assert.NoError(b, err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkShuffleList(b *testing.B) {
+	listSizes := []uint64{400000, 40000, 400}
+	seed := [32]byte{123, 42}
+	for _, listSize := range listSizes {
+		testIndices := make([]primitives.ValidatorIndex, listSize)
+		for i := range listSize {
+			testIndices[i] = primitives.ValidatorIndex(i)
+		}
+		b.Run(fmt.Sprintf("ShuffleList_%d", listSize), func(ib *testing.B) {
+			for ib.Loop() {
+				_, err := ShuffleList(testIndices, seed)
+				assert.NoError(b, err)
+			}
+		})
+	}
+}
+
+func TestShuffledIndex(t *testing.T) {
+	ClearCache()
+
+	var list []primitives.ValidatorIndex
+	listSize := uint64(399)
+	for i := primitives.ValidatorIndex(0); uint64(i) < listSize; i++ {
+		list = append(list, i)
+	}
+	shuffledList := make([]primitives.ValidatorIndex, listSize)
+	unshuffledlist := make([]primitives.ValidatorIndex, listSize)
+	seed := [32]byte{123, 42}
+	for i := primitives.ValidatorIndex(0); uint64(i) < listSize; i++ {
+		si, err := ShuffledIndex(i, listSize, seed)
+		assert.NoError(t, err)
+		shuffledList[si] = i
+	}
+	for i := primitives.ValidatorIndex(0); uint64(i) < listSize; i++ {
+		ui, err := UnShuffledIndex(i, listSize, seed)
+		assert.NoError(t, err)
+		unshuffledlist[ui] = shuffledList[i]
+	}
+	assert.DeepEqual(t, list, unshuffledlist)
+}

@@ -1,0 +1,82 @@
+package customtypes
+
+import (
+	"fmt"
+
+	"github.com/OffchainLabs/methodical-ssz/ssz"
+
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+)
+
+var _ ssz.HashRoot = (RandaoMixes)([][32]byte{})
+var _ ssz.Marshaler = (*RandaoMixes)(nil)
+var _ ssz.Unmarshaler = (*RandaoMixes)(nil)
+
+// RandaoMixes represents RANDAO mixes of the beacon state.
+type RandaoMixes [][32]byte
+
+// HashTreeRoot returns calculated hash root.
+func (r RandaoMixes) HashTreeRoot() ([32]byte, error) {
+	return ssz.HashWithDefaultHasher(r)
+}
+
+// HashTreeRootWith hashes a RandaoMixes object with a Hasher from the default HasherPool.
+func (r RandaoMixes) HashTreeRootWith(hh *ssz.Hasher) error {
+	index := hh.Index()
+	for _, sRoot := range r {
+		hh.Append(sRoot[:])
+	}
+	hh.Merkleize(index)
+	return nil
+}
+
+// UnmarshalSSZ deserializes the provided bytes buffer into the RandaoMixes object.
+func (r *RandaoMixes) UnmarshalSSZ(buf []byte) error {
+	if len(buf) != r.SizeSSZ() {
+		return fmt.Errorf("expected buffer of length %d received %d", r.SizeSSZ(), len(buf))
+	}
+
+	roots := RandaoMixes(make([][32]byte, fieldparams.RandaoMixesLength))
+	for i := range roots {
+		copy(roots[i][:], buf[i*32:(i+1)*32])
+	}
+	*r = roots
+	return nil
+}
+
+// MarshalSSZTo marshals RandaoMixes with the provided byte slice.
+func (r RandaoMixes) MarshalSSZTo(dst []byte) ([]byte, error) {
+	marshalled, err := r.MarshalSSZ()
+	if err != nil {
+		return nil, err
+	}
+	return append(dst, marshalled...), nil
+}
+
+// MarshalSSZ marshals RandaoMixes into a serialized object.
+func (r RandaoMixes) MarshalSSZ() ([]byte, error) {
+	marshalled := make([]byte, fieldparams.RandaoMixesLength*32)
+	for i, r32 := range r {
+		copy(marshalled[i*32:(i+1)*32], r32[:])
+	}
+	return marshalled, nil
+}
+
+// SizeSSZ returns the size of the serialized object.
+func (_ RandaoMixes) SizeSSZ() int {
+	return fieldparams.RandaoMixesLength * 32
+}
+
+// Slice converts a customtypes.RandaoMixes object into a 2D byte slice.
+// Each item in the slice is a copy of the original item.
+func (r RandaoMixes) Slice() [][]byte {
+	if r == nil {
+		return nil
+	}
+	mixes := make([][]byte, len(r))
+	for i, root := range r {
+		tmp := root
+		mixes[i] = tmp[:]
+	}
+	return mixes
+}

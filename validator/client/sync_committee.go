@@ -1,0 +1,286 @@
+package client
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/altair"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/signing"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	"github.com/OffchainLabs/prysm/v7/monitoring/tracing"
+	"github.com/OffchainLabs/prysm/v7/monitoring/tracing/trace"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	validatorpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1/validator-client"
+	"github.com/OffchainLabs/prysm/v7/time/slots"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	emptypb "github.com/golang/protobuf/ptypes/empty"
+	"github.com/sirupsen/logrus"
+)
+
+// syncMessageDueComponent returns the slot-component basis points for the
+// sync committee message due time.
+func syncMessageDueComponent(slot primitives.Slot) primitives.BP {
+	cfg := params.BeaconConfig()
+	if slots.ToEpoch(slot) >= cfg.GloasForkEpoch {
+		return cfg.SyncMessageDueBPSGloas
+	}
+
+	return cfg.SyncMessageDueBPS
+}
+
+// SubmitSyncCommitteeMessage submits the sync committee message to the beacon chain.
+func (v *validator) SubmitSyncCommitteeMessage(ctx context.Context, slot primitives.Slot, pubKey [fieldparams.BLSPubkeyLength]byte) {
+	ctx, span := trace.StartSpan(ctx, "validator.SubmitSyncCommitteeMessage")
+	defer span.End()
+	span.SetAttributes(trace.StringAttribute("validator", fmt.Sprintf("%#x", pubKey)))
+
+	v.waitUntilAttestationDueOrValidBlock(ctx, slot)
+
+	ctx, err := v.withHeadHint(ctx, slot, syncMessageDueComponent(slot))
+	if err != nil {
+		log.WithField("slot", slot).WithError(err).Error("Could not attach freshness hint")
+		tracing.AnnotateError(span, err)
+		return
+	}
+
+	res, err := v.validatorClient.SyncMessageBlockRoot(ctx, &emptypb.Empty{})
+	if err != nil {
+		log.WithError(err).Error("Could not request sync message block root to sign")
+		tracing.AnnotateError(span, err)
+		return
+	}
+
+	duty, err := v.duty(pubKey)
+	if err != nil {
+		log.WithError(err).Error("Could not fetch validator assignment")
+		return
+	}
+
+	d, err := v.domainData(ctx, slots.ToEpoch(slot), params.BeaconConfig().DomainSyncCommittee[:])
+	if err != nil {
+		log.WithError(err).Error("Could not get sync committee domain data")
+		return
+	}
+	sszRoot := primitives.SSZBytes(res.Root)
+	r, err := signing.ComputeSigningRoot(&sszRoot, d.SignatureDomain)
+	if err != nil {
+		log.WithError(err).Error("Could not get sync committee message signing root")
+		return
+	}
+
+	sig, err := v.km.Sign(ctx, &validatorpb.SignRequest{
+		PublicKey:       pubKey[:],
+		SigningRoot:     r[:],
+		SignatureDomain: d.SignatureDomain,
+		Object: &validatorpb.SignRequest_SyncMessageBlockRoot{
+			SyncMessageBlockRoot: res.Root,
+		},
+		SigningSlot: slot,
+	})
+	if err != nil {
+		log.WithError(err).Error("Could not sign sync committee message")
+		return
+	}
+
+	msg := &ethpb.SyncCommitteeMessage{
+		Slot:           slot,
+		BlockRoot:      res.Root,
+		ValidatorIndex: duty.ValidatorIndex,
+		Signature:      sig.Marshal(),
+	}
+	if _, err := v.validatorClient.SubmitSyncMessage(ctx, msg); err != nil {
+		log.WithError(err).Error("Could not submit sync committee message")
+		return
+	}
+
+	msgSlot := msg.Slot
+	slotTime, err := slots.StartTime(v.genesisTime, msgSlot)
+	if err != nil {
+		log.WithError(err).Error("Failed to determine slot start time")
+	}
+	log.WithFields(logrus.Fields{
+		"slot":               msg.Slot,
+		"slotStartTime":      slotTime,
+		"timeSinceSlotStart": time.Since(slotTime),
+		"blockRoot":          fmt.Sprintf("%#x", bytesutil.Trunc(msg.BlockRoot)),
+		"validatorIndex":     msg.ValidatorIndex,
+	}).Debug("Submitted new sync message")
+	v.saveSubmittedSyncMessage(msg)
+}
+
+// SubmitSignedContributionAndProof submits the signed sync committee contribution and proof to the beacon chain.
+func (v *validator) SubmitSignedContributionAndProof(ctx context.Context, slot primitives.Slot, pubKey [fieldparams.BLSPubkeyLength]byte) {
+	ctx, span := trace.StartSpan(ctx, "validator.SubmitSignedContributionAndProof")
+	defer span.End()
+	span.SetAttributes(trace.StringAttribute("validator", fmt.Sprintf("%#x", pubKey)))
+
+	duty, err := v.duty(pubKey)
+	if err != nil {
+		log.WithError(err).Error("Could not fetch validator assignment")
+		return
+	}
+
+	indexRes, err := v.validatorClient.SyncSubcommitteeIndex(ctx, &ethpb.SyncSubcommitteeIndexRequest{
+		PublicKey: pubKey[:],
+		Slot:      slot,
+	})
+	if err != nil {
+		log.WithError(err).Error("Could not get sync subcommittee index")
+		return
+	}
+	if len(indexRes.Indices) == 0 {
+		log.Debug("Empty subcommittee index list, do nothing")
+		return
+	}
+
+	selectionProofs, err := v.aggSelector.SyncCommitteeSelectionProofs(ctx, slot, pubKey, indexRes)
+	if err != nil {
+		log.WithError(err).Error("Could not get selection proofs")
+		return
+	}
+
+	cfg := params.BeaconConfig()
+	component := cfg.ContributionDueBPS
+	if slots.ToEpoch(slot) >= cfg.GloasForkEpoch {
+		component = cfg.ContributionDueBPSGloas
+	}
+	v.waitUntilSlotComponent(ctx, slot, component)
+
+	ctx, err = v.withHeadHint(ctx, slot, component)
+	if err != nil {
+		log.WithField("slot", slot).WithError(err).Error("Could not attach freshness hint")
+		return
+	}
+
+	coveredSubnets := make(map[uint64]bool)
+	for i, comIdx := range indexRes.Indices {
+		isAggregator, err := altair.IsSyncCommitteeAggregator(selectionProofs[i])
+		if err != nil {
+			log.WithError(err).Error("Could check in aggregator")
+			return
+		}
+		if !isAggregator {
+			continue
+		}
+		subCommitteeSize := params.BeaconConfig().SyncCommitteeSize / params.BeaconConfig().SyncCommitteeSubnetCount
+		subnet := uint64(comIdx) / subCommitteeSize
+		if coveredSubnets[subnet] {
+			// Don't submit a message for the same subnet multiple times
+			continue
+		}
+		contribution, err := v.validatorClient.SyncCommitteeContribution(ctx, &ethpb.SyncCommitteeContributionRequest{
+			Slot:      slot,
+			PublicKey: pubKey[:],
+			SubnetId:  subnet,
+		})
+		if err != nil {
+			log.WithError(err).Error("Could not get sync committee contribution")
+			return
+		}
+		if contribution.AggregationBits.Count() == 0 {
+			log.WithFields(logrus.Fields{
+				"slot":   slot,
+				"pubkey": hexutil.Encode(pubKey[:]),
+				"subnet": subnet,
+			}).Warn("Sync contribution for validator has no bits set.")
+			continue
+		}
+
+		contributionAndProof := &ethpb.ContributionAndProof{
+			AggregatorIndex: duty.ValidatorIndex,
+			Contribution:    contribution,
+			SelectionProof:  selectionProofs[i],
+		}
+		sig, err := v.signContributionAndProof(ctx, pubKey, contributionAndProof, slot)
+		if err != nil {
+			log.WithError(err).Error("Could not sign contribution and proof")
+			return
+		}
+
+		if _, err := v.validatorClient.SubmitSignedContributionAndProof(ctx, &ethpb.SignedContributionAndProof{
+			Message:   contributionAndProof,
+			Signature: sig,
+		}); err != nil {
+			log.WithError(err).Error("Could not submit signed contribution and proof")
+			return
+		}
+
+		coveredSubnets[subnet] = true
+
+		contributionSlot := contributionAndProof.Contribution.Slot
+		slotTime, err := slots.StartTime(v.genesisTime, contributionSlot)
+		if err != nil {
+			log.WithError(err).Error("Failed to determine slot start time")
+		}
+		log.WithFields(logrus.Fields{
+			"slot":               contributionAndProof.Contribution.Slot,
+			"slotStartTime":      slotTime,
+			"timeSinceSlotStart": time.Since(slotTime),
+			"blockRoot":          fmt.Sprintf("%#x", bytesutil.Trunc(contributionAndProof.Contribution.BlockRoot)),
+			"subcommitteeIndex":  contributionAndProof.Contribution.SubcommitteeIndex,
+			"aggregatorIndex":    contributionAndProof.AggregatorIndex,
+			"bitsCount":          contributionAndProof.Contribution.AggregationBits.Count(),
+		}).Debug("Submitted new sync contribution and proof")
+		v.saveSubmittedSyncContribution(contributionAndProof)
+	}
+}
+
+// Signs input slot with domain sync committee selection proof. This is used to create the signature for sync committee selection.
+func (v *validator) signSyncSelectionData(ctx context.Context, pubKey [fieldparams.BLSPubkeyLength]byte, index uint64, slot primitives.Slot) (signature []byte, err error) {
+	ctx, span := trace.StartSpan(ctx, "validator.signSyncSelectionData")
+	defer span.End()
+
+	domain, err := v.domainData(ctx, slots.ToEpoch(slot), params.BeaconConfig().DomainSyncCommitteeSelectionProof[:])
+	if err != nil {
+		return nil, err
+	}
+	data := &ethpb.SyncAggregatorSelectionData{
+		Slot:              slot,
+		SubcommitteeIndex: index,
+	}
+	root, err := signing.ComputeSigningRoot(data, domain.SignatureDomain)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := v.km.Sign(ctx, &validatorpb.SignRequest{
+		PublicKey:       pubKey[:],
+		SigningRoot:     root[:],
+		SignatureDomain: domain.SignatureDomain,
+		Object:          &validatorpb.SignRequest_SyncAggregatorSelectionData{SyncAggregatorSelectionData: data},
+		SigningSlot:     slot,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sig.Marshal(), nil
+}
+
+// This returns the signature of validator signing over sync committee contribution and proof object.
+func (v *validator) signContributionAndProof(ctx context.Context, pubKey [fieldparams.BLSPubkeyLength]byte, c *ethpb.ContributionAndProof, slot primitives.Slot) ([]byte, error) {
+	ctx, span := trace.StartSpan(ctx, "validator.signContributionAndProof")
+	defer span.End()
+
+	d, err := v.domainData(ctx, slots.ToEpoch(c.Contribution.Slot), params.BeaconConfig().DomainContributionAndProof[:])
+	if err != nil {
+		return nil, err
+	}
+	root, err := signing.ComputeSigningRoot(c, d.SignatureDomain)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := v.km.Sign(ctx, &validatorpb.SignRequest{
+		PublicKey:       pubKey[:],
+		SigningRoot:     root[:],
+		SignatureDomain: d.SignatureDomain,
+		Object:          &validatorpb.SignRequest_ContributionAndProof{ContributionAndProof: c},
+		SigningSlot:     slot,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sig.Marshal(), nil
+}

@@ -1,0 +1,117 @@
+package structs
+
+import (
+	"encoding/json"
+)
+
+type GetBeaconStateV2Response struct {
+	Version             string          `json:"version"`
+	ExecutionOptimistic bool            `json:"execution_optimistic"`
+	Finalized           bool            `json:"finalized"`
+	Data                json.RawMessage `json:"data"` // represents the state values based on the version
+}
+
+type GetForkChoiceHeadsV2Response struct {
+	Data []*ForkChoiceHead `json:"data"`
+}
+
+type ForkChoiceHead struct {
+	Root                string `json:"root"`
+	Slot                string `json:"slot"`
+	ExecutionOptimistic bool   `json:"execution_optimistic"`
+}
+
+type GetForkChoiceDumpResponse struct {
+	JustifiedCheckpoint *Checkpoint              `json:"justified_checkpoint"`
+	FinalizedCheckpoint *Checkpoint              `json:"finalized_checkpoint"`
+	ForkChoiceNodes     []*ForkChoiceNode        `json:"fork_choice_nodes"`
+	ExtraData           *ForkChoiceDumpExtraData `json:"extra_data"`
+}
+
+type ForkChoiceDumpExtraData struct {
+	UnrealizedJustifiedCheckpoint *Checkpoint `json:"unrealized_justified_checkpoint"`
+	UnrealizedFinalizedCheckpoint *Checkpoint `json:"unrealized_finalized_checkpoint"`
+	ProposerBoostRoot             string      `json:"proposer_boost_root"`
+	PreviousProposerBoostRoot     string      `json:"previous_proposer_boost_root"`
+	HeadRoot                      string      `json:"head_root"`
+}
+
+type ForkChoiceNode struct {
+	Slot               string                   `json:"slot"`
+	BlockRoot          string                   `json:"block_root"`
+	ParentRoot         string                   `json:"parent_root"`
+	JustifiedEpoch     string                   `json:"justified_epoch"`
+	FinalizedEpoch     string                   `json:"finalized_epoch"`
+	Weight             string                   `json:"weight"`
+	Validity           string                   `json:"validity"`
+	ExecutionBlockHash string                   `json:"execution_block_hash"`
+	ExtraData          *ForkChoiceNodeExtraData `json:"extra_data"`
+}
+
+type ForkChoiceNodeExtraData struct {
+	UnrealizedJustifiedEpoch string `json:"unrealized_justified_epoch"`
+	UnrealizedFinalizedEpoch string `json:"unrealized_finalized_epoch"`
+	Balance                  string `json:"balance"`
+	ExecutionOptimistic      bool   `json:"execution_optimistic"`
+	TimeStamp                string `json:"timestamp"`
+	Target                   string `json:"target"`
+}
+
+type GetForkChoiceDumpV2Response struct {
+	JustifiedCheckpoint *Checkpoint              `json:"justified_checkpoint"`
+	FinalizedCheckpoint *Checkpoint              `json:"finalized_checkpoint"`
+	ForkChoiceNodes     []*ForkChoiceNodeV2      `json:"fork_choice_nodes"`
+	ExtraData           *ForkChoiceDumpExtraData `json:"extra_data"`
+}
+
+type ForkChoiceNodeV2 struct {
+	PayloadStatus      string                     `json:"payload_status"`
+	Slot               string                     `json:"slot"`
+	BlockRoot          string                     `json:"block_root"`
+	ParentRoot         string                     `json:"parent_root"`
+	Weight             string                     `json:"weight"`
+	Validity           string                     `json:"validity"`
+	ExecutionBlockHash string                     `json:"execution_block_hash"`
+	ExtraData          *ForkChoiceNodeV2ExtraData `json:"extra_data"`
+}
+
+type ForkChoiceNodeV2ExtraData struct {
+	Balance             string `json:"balance"`
+	ExecutionOptimistic bool   `json:"execution_optimistic"`
+	TimeStamp           string `json:"timestamp"`
+
+	Target                          string `json:"target,omitempty"`
+	JustifiedEpoch                  string `json:"justified_epoch,omitempty"`
+	FinalizedEpoch                  string `json:"finalized_epoch,omitempty"`
+	UnrealizedJustifiedEpoch        string `json:"unrealized_justified_epoch,omitempty"`
+	UnrealizedFinalizedEpoch        string `json:"unrealized_finalized_epoch,omitempty"`
+	PayloadAttesterCount            string `json:"payload_attester_count,omitempty"`
+	PayloadAvailabilityYesCount     string `json:"payload_availability_yes_count,omitempty"`
+	PayloadDataAvailabilityYesCount string `json:"payload_data_availability_yes_count,omitempty"`
+
+	GasLimit string `json:"gas_limit,omitempty"`
+}
+
+type GetDebugDataColumnSidecarsResponse struct {
+	Version             string          `json:"version"`
+	ExecutionOptimistic bool            `json:"execution_optimistic"`
+	Finalized           bool            `json:"finalized"`
+	Data                json.RawMessage `json:"data"` // []*DataColumnSidecar pre-Gloas, []*DataColumnSidecarGloas post-Gloas
+}
+
+type DataColumnSidecar struct {
+	Index                        string                   `json:"index"`
+	Column                       []string                 `json:"column"`
+	KzgCommitments               []string                 `json:"kzg_commitments"`
+	KzgProofs                    []string                 `json:"kzg_proofs"`
+	SignedBeaconBlockHeader      *SignedBeaconBlockHeader `json:"signed_block_header"`
+	KzgCommitmentsInclusionProof []string                 `json:"kzg_commitments_inclusion_proof"`
+}
+
+type DataColumnSidecarGloas struct {
+	Index           string   `json:"index"`
+	Column          []string `json:"column"`
+	KzgProofs       []string `json:"kzg_proofs"`
+	Slot            string   `json:"slot"`
+	BeaconBlockRoot string   `json:"beacon_block_root"`
+}

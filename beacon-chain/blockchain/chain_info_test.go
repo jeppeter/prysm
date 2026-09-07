@@ -1,0 +1,908 @@
+package blockchain
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	testDB "github.com/OffchainLabs/prysm/v7/beacon-chain/db/testing"
+	forkchoicetypes "github.com/OffchainLabs/prysm/v7/beacon-chain/forkchoice/types"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	state_native "github.com/OffchainLabs/prysm/v7/beacon-chain/state/state-native"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	"github.com/OffchainLabs/prysm/v7/genesis"
+	enginev1 "github.com/OffchainLabs/prysm/v7/proto/engine/v1"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/OffchainLabs/prysm/v7/testing/assert"
+	"github.com/OffchainLabs/prysm/v7/testing/require"
+	"github.com/OffchainLabs/prysm/v7/testing/util"
+	"github.com/OffchainLabs/prysm/v7/time/slots"
+	"google.golang.org/protobuf/proto"
+)
+
+// Ensure Service implements chain info interface.
+var _ ChainInfoFetcher = (*Service)(nil)
+var _ TimeFetcher = (*Service)(nil)
+var _ ForkFetcher = (*Service)(nil)
+
+// prepareForkchoiceState prepares a beacon state with the given data to mock
+// insert into forkchoice
+func prepareForkchoiceState(
+	_ context.Context,
+	slot primitives.Slot,
+	blockRoot [32]byte,
+	parentRoot [32]byte,
+	payloadHash [32]byte,
+	justified *ethpb.Checkpoint,
+	finalized *ethpb.Checkpoint,
+) (state.BeaconState, blocks.ROBlock, error) {
+	blockHeader := &ethpb.BeaconBlockHeader{
+		ParentRoot: parentRoot[:],
+	}
+
+	executionHeader := &enginev1.ExecutionPayloadHeader{
+		BlockHash: payloadHash[:],
+	}
+
+	base := &ethpb.BeaconStateBellatrix{
+		Slot:                         slot,
+		RandaoMixes:                  make([][]byte, params.BeaconConfig().EpochsPerHistoricalVector),
+		BlockRoots:                   make([][]byte, 1),
+		CurrentJustifiedCheckpoint:   justified,
+		FinalizedCheckpoint:          finalized,
+		LatestExecutionPayloadHeader: executionHeader,
+		LatestBlockHeader:            blockHeader,
+	}
+
+	base.BlockRoots[0] = append(base.BlockRoots[0], blockRoot[:]...)
+	st, err := state_native.InitializeFromProtoBellatrix(base)
+	if err != nil {
+		return nil, blocks.ROBlock{}, err
+	}
+	blk := &ethpb.SignedBeaconBlockBellatrix{
+		Block: &ethpb.BeaconBlockBellatrix{
+			Slot:       slot,
+			ParentRoot: parentRoot[:],
+			Body: &ethpb.BeaconBlockBodyBellatrix{
+				ExecutionPayload: &enginev1.ExecutionPayload{
+					BlockHash: payloadHash[:],
+				},
+			},
+		},
+	}
+	signed, err := blocks.NewSignedBeaconBlock(blk)
+	if err != nil {
+		return nil, blocks.ROBlock{}, err
+	}
+	roblock, err := blocks.NewROBlockWithRoot(signed, blockRoot)
+	return st, roblock, err
+}
+
+func TestHeadRoot_Nil(t *testing.T) {
+	beaconDB := testDB.SetupDB(t)
+	c := setupBeaconChain(t, beaconDB)
+	headRoot, err := c.HeadRoot(t.Context())
+	require.NoError(t, err)
+	assert.DeepEqual(t, params.BeaconConfig().ZeroHash[:], headRoot, "Incorrect pre chain start value")
+}
+
+func TestFinalizedCheckpt_GenesisRootOk(t *testing.T) {
+	service, tr := minimalTestService(t)
+	ctx, fcs := tr.ctx, tr.fcs
+
+	gs, _ := util.DeterministicGenesisState(t, 32)
+	require.NoError(t, service.saveGenesisData(ctx, gs))
+	cp := service.FinalizedCheckpt()
+	assert.DeepEqual(t, [32]byte{}, bytesutil.ToBytes32(cp.Root))
+	cp = service.CurrentJustifiedCheckpt()
+	assert.DeepEqual(t, [32]byte{}, bytesutil.ToBytes32(cp.Root))
+	// check that forkchoice has the right genesis root as the node root
+	root, err := fcs.Head(ctx)
+	require.NoError(t, err)
+	require.Equal(t, service.originBlockRoot, root)
+
+}
+
+func TestCurrentJustifiedCheckpt_CanRetrieve(t *testing.T) {
+	service, tr := minimalTestService(t)
+	ctx, beaconDB, fcs := tr.ctx, tr.db, tr.fcs
+
+	jroot := [32]byte{'j'}
+	cp := &forkchoicetypes.Checkpoint{Epoch: 6, Root: jroot}
+	bState, _ := util.DeterministicGenesisState(t, 10)
+	require.NoError(t, beaconDB.SaveState(ctx, bState, jroot))
+
+	require.NoError(t, fcs.UpdateJustifiedCheckpoint(ctx, cp))
+	jp := service.CurrentJustifiedCheckpt()
+	assert.Equal(t, cp.Epoch, jp.Epoch, "Unexpected justified epoch")
+	require.Equal(t, cp.Root, bytesutil.ToBytes32(jp.Root))
+}
+
+func TestFinalizedBlockHash(t *testing.T) {
+	service, tr := minimalTestService(t)
+	ctx, beaconDB, fcs := tr.ctx, tr.db, tr.fcs
+
+	r := [32]byte{'f'}
+	cp := &forkchoicetypes.Checkpoint{Epoch: 6, Root: r}
+	bState, _ := util.DeterministicGenesisState(t, 10)
+	require.NoError(t, beaconDB.SaveState(ctx, bState, r))
+
+	require.NoError(t, fcs.UpdateFinalizedCheckpoint(cp))
+	h := service.FinalizedBlockHash()
+	require.Equal(t, params.BeaconConfig().ZeroHash, h)
+	require.Equal(t, r, fcs.FinalizedCheckpoint().Root)
+}
+
+func TestUnrealizedJustifiedBlockHash(t *testing.T) {
+	ctx := t.Context()
+	service := testServiceWithDB(t)
+	ojc := &ethpb.Checkpoint{Root: []byte{'j'}}
+	ofc := &ethpb.Checkpoint{Root: []byte{'f'}}
+	st, roblock, err := prepareForkchoiceState(ctx, 0, [32]byte{}, [32]byte{}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, service.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	service.cfg.ForkChoiceStore.SetBalancesByRooter(func(_ context.Context, _ [32]byte) ([]uint64, error) { return []uint64{}, nil })
+	require.NoError(t, service.cfg.ForkChoiceStore.UpdateJustifiedCheckpoint(ctx, &forkchoicetypes.Checkpoint{Epoch: 6, Root: [32]byte{'j'}}))
+
+	h := service.UnrealizedJustifiedPayloadBlockHash()
+	require.Equal(t, params.BeaconConfig().ZeroHash, h)
+	require.Equal(t, [32]byte{'j'}, service.cfg.ForkChoiceStore.JustifiedCheckpoint().Root)
+}
+
+func TestHeadSlot_CanRetrieve(t *testing.T) {
+	c := testServiceNoDB(t)
+	s, err := state_native.InitializeFromProtoPhase0(&ethpb.BeaconState{})
+	require.NoError(t, err)
+	b, err := blocks.NewSignedBeaconBlock(util.NewBeaconBlock())
+	require.NoError(t, err)
+	b.SetSlot(100)
+	c.head = &head{block: b, state: s}
+	assert.Equal(t, primitives.Slot(100), c.HeadSlot())
+}
+
+func TestHeadRoot_CanRetrieve(t *testing.T) {
+	service, tr := minimalTestService(t)
+	ctx := tr.ctx
+
+	gs, _ := util.DeterministicGenesisState(t, 32)
+	require.NoError(t, service.saveGenesisData(ctx, gs))
+
+	r, err := service.HeadRoot(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, service.originBlockRoot, bytesutil.ToBytes32(r))
+}
+
+func TestHeadRoot_UseDB(t *testing.T) {
+	service, tr := minimalTestService(t)
+	ctx, beaconDB := tr.ctx, tr.db
+
+	service.head = &head{root: params.BeaconConfig().ZeroHash}
+	b := util.NewBeaconBlock()
+	br, err := b.Block.HashTreeRoot()
+	require.NoError(t, err)
+	wsb, err := blocks.NewSignedBeaconBlock(b)
+	require.NoError(t, err)
+	require.NoError(t, beaconDB.SaveBlock(ctx, wsb))
+	require.NoError(t, beaconDB.SaveStateSummary(ctx, &ethpb.StateSummary{Root: br[:]}))
+	require.NoError(t, beaconDB.SaveHeadBlockRoot(ctx, br))
+	r, err := service.HeadRoot(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, br, bytesutil.ToBytes32(r))
+}
+
+func TestHeadBlock_CanRetrieve(t *testing.T) {
+	b := util.NewBeaconBlock()
+	b.Block.Slot = 1
+	s, err := state_native.InitializeFromProtoPhase0(&ethpb.BeaconState{})
+	require.NoError(t, err)
+	wsb, err := blocks.NewSignedBeaconBlock(b)
+	require.NoError(t, err)
+	c := testServiceNoDB(t)
+	c.head = &head{block: wsb, state: s}
+
+	received, err := c.HeadBlock(t.Context())
+	require.NoError(t, err)
+	pb, err := received.Proto()
+	require.NoError(t, err)
+	assert.DeepEqual(t, b, pb, "Incorrect head block received")
+}
+
+func TestHeadState_CanRetrieve(t *testing.T) {
+	s, err := state_native.InitializeFromProtoPhase0(&ethpb.BeaconState{Slot: 2, GenesisValidatorsRoot: params.BeaconConfig().ZeroHash[:]})
+	require.NoError(t, err)
+	c := testServiceNoDB(t)
+	c.head = &head{state: s}
+	headState, err := c.HeadState(t.Context())
+	require.NoError(t, err)
+	assert.DeepEqual(t, headState.ToProtoUnsafe(), s.ToProtoUnsafe(), "Incorrect head state received")
+}
+
+func TestGenesisTime_CanRetrieve(t *testing.T) {
+	c := testServiceNoDB(t)
+	c.genesisTime = time.Unix(999, 0)
+	wanted := time.Unix(999, 0)
+	assert.Equal(t, wanted, c.GenesisTime(), "Did not get wanted genesis time")
+}
+
+func TestCurrentFork_CanRetrieve(t *testing.T) {
+	f := &ethpb.Fork{Epoch: 999}
+	s, err := state_native.InitializeFromProtoPhase0(&ethpb.BeaconState{Fork: f})
+	require.NoError(t, err)
+	c := testServiceNoDB(t)
+	c.head = &head{state: s}
+	if !proto.Equal(c.CurrentFork(), f) {
+		t.Error("Received incorrect fork version")
+	}
+}
+
+func TestCurrentFork_NilHeadSTate(t *testing.T) {
+	f := &ethpb.Fork{
+		PreviousVersion: params.BeaconConfig().GenesisForkVersion,
+		CurrentVersion:  params.BeaconConfig().GenesisForkVersion,
+	}
+	c := testServiceNoDB(t)
+	if !proto.Equal(c.CurrentFork(), f) {
+		t.Error("Received incorrect fork version")
+	}
+}
+
+func TestGenesisValidatorsRoot_CanRetrieve(t *testing.T) {
+	// Should not panic if head state is nil.
+	c := testServiceNoDB(t)
+	assert.Equal(t, [32]byte{}, c.GenesisValidatorsRoot(), "Did not get correct genesis validators root")
+
+	s, err := state_native.InitializeFromProtoPhase0(&ethpb.BeaconState{GenesisValidatorsRoot: []byte{'a'}})
+	require.NoError(t, err)
+	c.head = &head{state: s}
+	assert.Equal(t, [32]byte{'a'}, c.GenesisValidatorsRoot(), "Did not get correct genesis validators root")
+}
+
+func TestHeadETH1Data_Nil(t *testing.T) {
+	beaconDB := testDB.SetupDB(t)
+	c := setupBeaconChain(t, beaconDB)
+	assert.DeepEqual(t, &ethpb.Eth1Data{}, c.HeadETH1Data(), "Incorrect pre chain start value")
+}
+
+func TestHeadETH1Data_CanRetrieve(t *testing.T) {
+	d := &ethpb.Eth1Data{DepositCount: 999}
+	s, err := state_native.InitializeFromProtoPhase0(&ethpb.BeaconState{Eth1Data: d})
+	require.NoError(t, err)
+	c := testServiceNoDB(t)
+	c.head = &head{state: s}
+	if !proto.Equal(c.HeadETH1Data(), d) {
+		t.Error("Received incorrect eth1 data")
+	}
+}
+
+func TestIsCanonical_Ok(t *testing.T) {
+	ctx := t.Context()
+	beaconDB := testDB.SetupDB(t)
+	c := setupBeaconChain(t, beaconDB)
+
+	blk := util.NewBeaconBlock()
+	blk.Block.Slot = 0
+	root, err := blk.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, ctx, beaconDB, blk)
+	require.NoError(t, beaconDB.SaveGenesisBlockRoot(ctx, root))
+	can, err := c.IsCanonical(ctx, root)
+	require.NoError(t, err)
+	assert.Equal(t, true, can)
+
+	can, err = c.IsCanonical(ctx, [32]byte{'a'})
+	require.NoError(t, err)
+	assert.Equal(t, false, can)
+}
+
+func TestService_HeadValidatorsIndices(t *testing.T) {
+	s, _ := util.DeterministicGenesisState(t, 10)
+	c := testServiceNoDB(t)
+
+	c.head = &head{}
+	indices, err := c.HeadValidatorsIndices(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, 0, len(indices))
+
+	c.head = &head{state: s}
+	indices, err = c.HeadValidatorsIndices(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, 10, len(indices))
+}
+
+func TestService_HeadGenesisValidatorsRoot(t *testing.T) {
+	s, _ := util.DeterministicGenesisState(t, 1)
+	c := testServiceNoDB(t)
+
+	c.head = &head{}
+	root := c.HeadGenesisValidatorsRoot()
+	require.Equal(t, [32]byte{}, root)
+
+	c.head = &head{state: s}
+	root = c.HeadGenesisValidatorsRoot()
+	require.DeepEqual(t, root[:], s.GenesisValidatorsRoot())
+}
+
+//
+//  A <- B <- C
+//   \    \
+//    \    ---------- E
+//     ---------- D
+
+func TestService_ChainHeads(t *testing.T) {
+	ctx := t.Context()
+	c := testServiceWithDB(t)
+	ojc := &ethpb.Checkpoint{Root: params.BeaconConfig().ZeroHash[:]}
+	ofc := &ethpb.Checkpoint{Root: params.BeaconConfig().ZeroHash[:]}
+	st, roblock, err := prepareForkchoiceState(ctx, 0, [32]byte{}, [32]byte{}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	st, roblock, err = prepareForkchoiceState(ctx, 100, [32]byte{'a'}, [32]byte{}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	st, roblock, err = prepareForkchoiceState(ctx, 101, [32]byte{'b'}, [32]byte{'a'}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	st, roblock, err = prepareForkchoiceState(ctx, 102, [32]byte{'c'}, [32]byte{'b'}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	st, roblock, err = prepareForkchoiceState(ctx, 103, [32]byte{'d'}, [32]byte{'a'}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	st, roblock, err = prepareForkchoiceState(ctx, 104, [32]byte{'e'}, [32]byte{'b'}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+
+	roots, slots := c.ChainHeads()
+	require.Equal(t, 3, len(roots))
+	rootMap := map[[32]byte]primitives.Slot{{'c'}: 102, {'d'}: 103, {'e'}: 104}
+	for i, root := range roots {
+		slot, ok := rootMap[root]
+		require.Equal(t, true, ok)
+		require.Equal(t, slot, slots[i])
+	}
+}
+
+func TestService_HeadPublicKeyToValidatorIndex(t *testing.T) {
+	s, _ := util.DeterministicGenesisState(t, 10)
+	c := testServiceNoDB(t)
+	c.head = &head{state: s}
+
+	_, e := c.HeadPublicKeyToValidatorIndex([fieldparams.BLSPubkeyLength]byte{})
+	require.Equal(t, false, e)
+
+	v, err := s.ValidatorAtIndex(0)
+	require.NoError(t, err)
+
+	i, e := c.HeadPublicKeyToValidatorIndex(bytesutil.ToBytes48(v.PublicKey))
+	require.Equal(t, true, e)
+	require.Equal(t, primitives.ValidatorIndex(0), i)
+}
+
+func TestService_HeadPublicKeyToValidatorIndexNil(t *testing.T) {
+	c := testServiceNoDB(t)
+	c.head = nil
+
+	idx, e := c.HeadPublicKeyToValidatorIndex([fieldparams.BLSPubkeyLength]byte{})
+	require.Equal(t, false, e)
+	require.Equal(t, primitives.ValidatorIndex(0), idx)
+
+	c.head = &head{state: nil}
+	i, e := c.HeadPublicKeyToValidatorIndex([fieldparams.BLSPubkeyLength]byte{})
+	require.Equal(t, false, e)
+	require.Equal(t, primitives.ValidatorIndex(0), i)
+}
+
+func TestService_HeadValidatorIndexToPublicKey(t *testing.T) {
+	s, _ := util.DeterministicGenesisState(t, 10)
+	c := testServiceNoDB(t)
+	c.head = &head{state: s}
+
+	p, err := c.HeadValidatorIndexToPublicKey(t.Context(), 0)
+	require.NoError(t, err)
+
+	v, err := s.ValidatorAtIndex(0)
+	require.NoError(t, err)
+
+	require.Equal(t, bytesutil.ToBytes48(v.PublicKey), p)
+}
+
+func TestService_HeadValidatorIndexToPublicKeyNil(t *testing.T) {
+	c := testServiceNoDB(t)
+	c.head = nil
+
+	p, err := c.HeadValidatorIndexToPublicKey(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, [fieldparams.BLSPubkeyLength]byte{}, p)
+
+	c.head = &head{state: nil}
+	p, err = c.HeadValidatorIndexToPublicKey(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, [fieldparams.BLSPubkeyLength]byte{}, p)
+}
+
+func TestService_IsOptimistic(t *testing.T) {
+	params.SetupTestConfigCleanup(t)
+	cfg := params.BeaconConfig()
+	cfg.BellatrixForkEpoch = 0
+	params.OverrideBeaconConfig(cfg)
+
+	ctx := t.Context()
+	ojc := &ethpb.Checkpoint{Root: params.BeaconConfig().ZeroHash[:]}
+	ofc := &ethpb.Checkpoint{Root: params.BeaconConfig().ZeroHash[:]}
+	c := testServiceWithDB(t)
+	c.SetGenesisTime(time.Now())
+	c.head = &head{root: [32]byte{'b'}}
+	st, roblock, err := prepareForkchoiceState(ctx, 100, [32]byte{'a'}, [32]byte{}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	st, roblock, err = prepareForkchoiceState(ctx, 101, [32]byte{'b'}, [32]byte{'a'}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+
+	opt, err := c.IsOptimistic(ctx)
+	require.NoError(t, err)
+	require.Equal(t, primitives.Slot(0), c.CurrentSlot())
+	require.Equal(t, false, opt)
+
+	c.SetGenesisTime(time.Now().Add(-time.Second * time.Duration(4*params.BeaconConfig().SecondsPerSlot)))
+	opt, err = c.IsOptimistic(ctx)
+	require.NoError(t, err)
+	require.Equal(t, true, opt)
+
+	// If head is nil, for some reason, an error should be returned rather than panic.
+	c = testServiceNoDB(t)
+	_, err = c.IsOptimistic(ctx)
+	require.ErrorIs(t, err, ErrNilHead)
+}
+
+func TestService_IsOptimisticBeforeBellatrix(t *testing.T) {
+	ctx := t.Context()
+	c := testServiceNoDB(t)
+	c.genesisTime = time.Now()
+	opt, err := c.IsOptimistic(ctx)
+	require.NoError(t, err)
+	require.Equal(t, false, opt)
+}
+
+func TestService_IsOptimisticForRoot(t *testing.T) {
+	ctx := t.Context()
+	c := testServiceWithDB(t)
+	c.head = &head{root: [32]byte{'b'}}
+	ojc := &ethpb.Checkpoint{Root: params.BeaconConfig().ZeroHash[:]}
+	ofc := &ethpb.Checkpoint{Root: params.BeaconConfig().ZeroHash[:]}
+	st, roblock, err := prepareForkchoiceState(ctx, 100, [32]byte{'a'}, [32]byte{}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+	st, roblock, err = prepareForkchoiceState(ctx, 101, [32]byte{'b'}, [32]byte{'a'}, params.BeaconConfig().ZeroHash, ojc, ofc)
+	require.NoError(t, err)
+	require.NoError(t, c.cfg.ForkChoiceStore.InsertNode(ctx, st, roblock))
+
+	opt, err := c.IsOptimisticForRoot(ctx, [32]byte{'a'})
+	require.NoError(t, err)
+	require.Equal(t, true, opt)
+}
+
+func TestService_IsOptimisticForRoot_DB(t *testing.T) {
+	ctx := t.Context()
+	c := testServiceWithDB(t)
+	c.head = &head{root: [32]byte{'b'}}
+	beaconDB := c.cfg.BeaconDB
+	c.head = &head{root: params.BeaconConfig().ZeroHash}
+	b := util.NewBeaconBlock()
+	b.Block.Slot = 10
+	br, err := b.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, t.Context(), beaconDB, b)
+	require.NoError(t, beaconDB.SaveStateSummary(t.Context(), &ethpb.StateSummary{Root: br[:], Slot: 10}))
+
+	optimisticBlock := util.NewBeaconBlock()
+	optimisticBlock.Block.Slot = 97
+	optimisticRoot, err := optimisticBlock.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, t.Context(), beaconDB, optimisticBlock)
+
+	validatedBlock := util.NewBeaconBlock()
+	validatedBlock.Block.Slot = 9
+	validatedRoot, err := validatedBlock.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, t.Context(), beaconDB, validatedBlock)
+
+	validatedCheckpoint := &ethpb.Checkpoint{Root: br[:]}
+	require.NoError(t, beaconDB.SaveLastValidatedCheckpoint(ctx, validatedCheckpoint))
+
+	optimistic, err := c.IsOptimisticForRoot(ctx, optimisticRoot)
+	require.NoError(t, err)
+	require.Equal(t, true, optimistic)
+
+	cp := &ethpb.Checkpoint{
+		Epoch: 1,
+		Root:  validatedRoot[:],
+	}
+	require.NoError(t, beaconDB.SaveGenesisBlockRoot(ctx, validatedRoot))
+	require.NoError(t, beaconDB.SaveFinalizedCheckpoint(ctx, cp))
+	validated, err := c.IsOptimisticForRoot(ctx, validatedRoot)
+	require.NoError(t, err)
+	require.Equal(t, false, validated)
+
+	// Before the first finalized epoch, finalized root could be zeros.
+	validatedCheckpoint = &ethpb.Checkpoint{Root: params.BeaconConfig().ZeroHash[:]}
+	require.NoError(t, beaconDB.SaveGenesisBlockRoot(ctx, br))
+	require.NoError(t, beaconDB.SaveStateSummary(t.Context(), &ethpb.StateSummary{Root: params.BeaconConfig().ZeroHash[:], Slot: 10}))
+	require.NoError(t, beaconDB.SaveLastValidatedCheckpoint(ctx, validatedCheckpoint))
+
+	require.NoError(t, beaconDB.SaveStateSummary(t.Context(), &ethpb.StateSummary{Root: optimisticRoot[:], Slot: 11}))
+	optimistic, err = c.IsOptimisticForRoot(ctx, optimisticRoot)
+	require.NoError(t, err)
+	require.Equal(t, true, optimistic)
+}
+
+func TestService_IsOptimisticForRoot_DB_non_canonical(t *testing.T) {
+	ctx := t.Context()
+	c := testServiceWithDB(t)
+	beaconDB := c.cfg.BeaconDB
+	c.head = &head{root: params.BeaconConfig().ZeroHash}
+	b := util.NewBeaconBlock()
+	b.Block.Slot = 10
+	br, err := b.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, t.Context(), beaconDB, b)
+	require.NoError(t, beaconDB.SaveStateSummary(t.Context(), &ethpb.StateSummary{Root: br[:], Slot: 10}))
+
+	optimisticBlock := util.NewBeaconBlock()
+	optimisticBlock.Block.Slot = 97
+	optimisticRoot, err := optimisticBlock.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, t.Context(), beaconDB, optimisticBlock)
+
+	validatedBlock := util.NewBeaconBlock()
+	validatedBlock.Block.Slot = 9
+	validatedRoot, err := validatedBlock.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, t.Context(), beaconDB, validatedBlock)
+
+	validatedCheckpoint := &ethpb.Checkpoint{Root: br[:]}
+	require.NoError(t, beaconDB.SaveLastValidatedCheckpoint(ctx, validatedCheckpoint))
+
+	require.NoError(t, beaconDB.SaveStateSummary(t.Context(), &ethpb.StateSummary{Root: optimisticRoot[:], Slot: 11}))
+	optimistic, err := c.IsOptimisticForRoot(ctx, optimisticRoot)
+	require.NoError(t, err)
+	require.Equal(t, true, optimistic)
+
+	require.NoError(t, beaconDB.SaveStateSummary(t.Context(), &ethpb.StateSummary{Root: validatedRoot[:], Slot: 9}))
+	validated, err := c.IsOptimisticForRoot(ctx, validatedRoot)
+	require.NoError(t, err)
+	require.Equal(t, true, validated)
+
+}
+
+func TestService_IsOptimisticForRoot_RecoverLastValidated(t *testing.T) {
+	// Validated checkpoint state summary is missing — recovery must use the
+	// checkpoint root, not the queried root, so the slot comparison is correct.
+	ctx := t.Context()
+	c := testServiceWithDB(t)
+	beaconDB := c.cfg.BeaconDB
+
+	cpBlock := util.NewBeaconBlock()
+	cpBlock.Block.Slot = 1
+	cpRoot, err := cpBlock.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, ctx, beaconDB, cpBlock)
+	st, _ := util.DeterministicGenesisState(t, 1)
+	require.NoError(t, beaconDB.SaveState(ctx, st, cpRoot))
+	require.NoError(t, beaconDB.SaveLastValidatedCheckpoint(ctx, &ethpb.Checkpoint{Root: cpRoot[:]}))
+
+	qBlock := util.NewBeaconBlock()
+	qBlock.Block.Slot = 2
+	qRoot, err := qBlock.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, ctx, beaconDB, qBlock)
+	require.NoError(t, beaconDB.SaveStateSummary(ctx, &ethpb.StateSummary{Root: qRoot[:], Slot: 2}))
+	require.NoError(t, beaconDB.SaveGenesisBlockRoot(ctx, qRoot))
+
+	optimistic, err := c.IsOptimisticForRoot(ctx, qRoot)
+	require.NoError(t, err)
+	require.Equal(t, true, optimistic)
+}
+
+func TestService_IsOptimisticForRoot_StateSummaryRecovered(t *testing.T) {
+	ctx := t.Context()
+	c := testServiceWithDB(t)
+	beaconDB := c.cfg.BeaconDB
+	c.head = &head{root: params.BeaconConfig().ZeroHash}
+	b := util.NewBeaconBlock()
+	b.Block.Slot = 10
+	br, err := b.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, t.Context(), beaconDB, b)
+	cpRoot := [32]byte{'v'}
+	require.NoError(t, beaconDB.SaveStateSummary(ctx, &ethpb.StateSummary{Root: cpRoot[:], Slot: 0}))
+	require.NoError(t, beaconDB.SaveLastValidatedCheckpoint(ctx, &ethpb.Checkpoint{Root: cpRoot[:]}))
+	_, err = c.IsOptimisticForRoot(ctx, br)
+	assert.NoError(t, err)
+	summ, err := beaconDB.StateSummary(ctx, br)
+	assert.NoError(t, err)
+	assert.NotNil(t, summ)
+	assert.Equal(t, 10, int(summ.Slot))
+	assert.DeepEqual(t, br[:], summ.Root)
+}
+
+func TestService_IsFinalized(t *testing.T) {
+	ctx := t.Context()
+	c := testServiceWithDB(t)
+	beaconDB := c.cfg.BeaconDB
+	r1 := [32]byte{'a'}
+	require.NoError(t, c.cfg.ForkChoiceStore.UpdateFinalizedCheckpoint(&forkchoicetypes.Checkpoint{
+		Root: r1,
+	}))
+	b := util.NewBeaconBlock()
+	br, err := b.Block.HashTreeRoot()
+	require.NoError(t, err)
+	util.SaveBlock(t, ctx, beaconDB, b)
+	require.NoError(t, beaconDB.SaveStateSummary(ctx, &ethpb.StateSummary{Root: br[:], Slot: 10}))
+	require.NoError(t, beaconDB.SaveGenesisBlockRoot(ctx, br))
+	require.NoError(t, beaconDB.SaveFinalizedCheckpoint(ctx, &ethpb.Checkpoint{
+		Root: br[:],
+	}))
+	require.Equal(t, true, c.IsFinalized(ctx, r1))
+	require.Equal(t, true, c.IsFinalized(ctx, br))
+	require.Equal(t, false, c.IsFinalized(ctx, [32]byte{'c'}))
+}
+
+func TestParentPayloadReady(t *testing.T) {
+	params.SetupTestConfigCleanup(t)
+	cfg := params.BeaconConfig().Copy()
+	cfg.GloasForkEpoch = 0
+	cfg.InitializeForkSchedule()
+	params.OverrideBeaconConfig(cfg)
+
+	service, tr := minimalTestService(t)
+	ctx := t.Context()
+	fcs := tr.fcs
+
+	parentRoot := [32]byte{1}
+	parentBlockHash := [32]byte{10}
+	zeroHash := params.BeaconConfig().ZeroHash
+
+	// Insert parent node into forkchoice.
+	st, parentROBlock, err := prepareGloasForkchoiceState(ctx, 1, parentRoot, zeroHash, parentBlockHash, zeroHash, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, fcs.InsertNode(ctx, st, parentROBlock))
+
+	t.Run("pre-Gloas always true", func(t *testing.T) {
+		blk := util.HydrateSignedBeaconBlockDeneb(&ethpb.SignedBeaconBlockDeneb{
+			Block: &ethpb.BeaconBlockDeneb{ParentRoot: parentRoot[:]},
+		})
+		wsb, err := blocks.NewSignedBeaconBlock(blk)
+		require.NoError(t, err)
+		require.Equal(t, true, service.ParentPayloadReady(wsb.Block()))
+	})
+
+	t.Run("parent not in forkchoice", func(t *testing.T) {
+		unknownParent := [32]byte{99}
+		bid := util.HydrateSignedExecutionPayloadBid(&ethpb.SignedExecutionPayloadBid{
+			Message: &ethpb.ExecutionPayloadBid{
+				BlockHash:       []byte{20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				ParentBlockHash: parentBlockHash[:],
+			},
+		})
+		blk := util.HydrateSignedBeaconBlockGloas(&ethpb.SignedBeaconBlockGloas{
+			Block: &ethpb.BeaconBlockGloas{
+				Slot:       2,
+				ParentRoot: unknownParent[:],
+				Body:       &ethpb.BeaconBlockBodyGloas{SignedExecutionPayloadBid: bid},
+			},
+		})
+		wsb, err := blocks.NewSignedBeaconBlock(blk)
+		require.NoError(t, err)
+		require.Equal(t, false, service.ParentPayloadReady(wsb.Block()))
+	})
+
+	t.Run("builds on empty", func(t *testing.T) {
+		differentHash := [32]byte{99}
+		bid := util.HydrateSignedExecutionPayloadBid(&ethpb.SignedExecutionPayloadBid{
+			Message: &ethpb.ExecutionPayloadBid{
+				BlockHash:       []byte{20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				ParentBlockHash: differentHash[:],
+			},
+		})
+		blk := util.HydrateSignedBeaconBlockGloas(&ethpb.SignedBeaconBlockGloas{
+			Block: &ethpb.BeaconBlockGloas{
+				Slot:       2,
+				ParentRoot: parentRoot[:],
+				Body:       &ethpb.BeaconBlockBodyGloas{SignedExecutionPayloadBid: bid},
+			},
+		})
+		wsb, err := blocks.NewSignedBeaconBlock(blk)
+		require.NoError(t, err)
+		require.Equal(t, true, service.ParentPayloadReady(wsb.Block()))
+	})
+
+	t.Run("builds on full without payload", func(t *testing.T) {
+		bid := util.HydrateSignedExecutionPayloadBid(&ethpb.SignedExecutionPayloadBid{
+			Message: &ethpb.ExecutionPayloadBid{
+				BlockHash:       []byte{20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				ParentBlockHash: parentBlockHash[:],
+			},
+		})
+		blk := util.HydrateSignedBeaconBlockGloas(&ethpb.SignedBeaconBlockGloas{
+			Block: &ethpb.BeaconBlockGloas{
+				Slot:       2,
+				ParentRoot: parentRoot[:],
+				Body:       &ethpb.BeaconBlockBodyGloas{SignedExecutionPayloadBid: bid},
+			},
+		})
+		wsb, err := blocks.NewSignedBeaconBlock(blk)
+		require.NoError(t, err)
+		require.Equal(t, false, service.ParentPayloadReady(wsb.Block()))
+	})
+
+	t.Run("builds on full with payload", func(t *testing.T) {
+		pe, err := blocks.WrappedROExecutionPayloadEnvelope(&ethpb.ExecutionPayloadEnvelope{
+			BeaconBlockRoot:       parentRoot[:],
+			ParentBeaconBlockRoot: make([]byte, 32),
+			Payload:               &enginev1.ExecutionPayloadGloas{},
+		})
+		require.NoError(t, err)
+		require.NoError(t, fcs.InsertPayload(pe))
+
+		bid := util.HydrateSignedExecutionPayloadBid(&ethpb.SignedExecutionPayloadBid{
+			Message: &ethpb.ExecutionPayloadBid{
+				BlockHash:       []byte{20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				ParentBlockHash: parentBlockHash[:],
+			},
+		})
+		blk := util.HydrateSignedBeaconBlockGloas(&ethpb.SignedBeaconBlockGloas{
+			Block: &ethpb.BeaconBlockGloas{
+				Slot:       2,
+				ParentRoot: parentRoot[:],
+				Body:       &ethpb.BeaconBlockBodyGloas{SignedExecutionPayloadBid: bid},
+			},
+		})
+		wsb, err := blocks.NewSignedBeaconBlock(blk)
+		require.NoError(t, err)
+		require.Equal(t, true, service.ParentPayloadReady(wsb.Block()))
+	})
+}
+
+func TestService_ShouldIgnoreData(t *testing.T) {
+	service, tr := minimalTestService(t)
+	ctx := t.Context()
+	fcs := tr.fcs
+
+	zeroHash := params.BeaconConfig().ZeroHash
+	currentSlot := service.CurrentSlot()
+	currentEpoch := slots.ToEpoch(currentSlot)
+	slotsPerEpoch := params.BeaconConfig().SlotsPerEpoch
+
+	// Build a chain in forkchoice:
+	// genesis (slot 0) -> nodeA (slot 1, epoch 0) -> nodeB (slot slotsPerEpoch, epoch 1) -> nodeC (slot 2*slotsPerEpoch, epoch 2)
+	nodeARoot := [32]byte{1}
+	nodeBRoot := [32]byte{2}
+	nodeCRoot := [32]byte{3}
+	nodeASlot := primitives.Slot(1)
+	nodeBSlot := primitives.Slot(slotsPerEpoch)     // epoch 1
+	nodeCSlot := primitives.Slot(2 * slotsPerEpoch) // epoch 2
+
+	stA, robA, err := prepareForkchoiceState(ctx, nodeASlot, nodeARoot, zeroHash, [32]byte{10}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]})
+	require.NoError(t, err)
+	require.NoError(t, fcs.InsertNode(ctx, stA, robA))
+
+	stB, robB, err := prepareForkchoiceState(ctx, nodeBSlot, nodeBRoot, nodeARoot, [32]byte{11}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]})
+	require.NoError(t, err)
+	require.NoError(t, fcs.InsertNode(ctx, stB, robB))
+
+	stC, robC, err := prepareForkchoiceState(ctx, nodeCSlot, nodeCRoot, nodeBRoot, [32]byte{12}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]})
+	require.NoError(t, err)
+	require.NoError(t, fcs.InsertNode(ctx, stC, robC))
+
+	// Set justified checkpoint to nodeB (epoch 1).
+	fcs.SetBalancesByRooter(func(_ context.Context, _ [32]byte) ([]uint64, error) { return []uint64{}, nil })
+	require.NoError(t, fcs.UpdateJustifiedCheckpoint(ctx, &forkchoicetypes.Checkpoint{Epoch: 1, Root: nodeBRoot}))
+
+	t.Run("past epoch data is not ignored", func(t *testing.T) {
+		pastSlot := primitives.Slot((currentEpoch - 1) * primitives.Epoch(slotsPerEpoch))
+		require.Equal(t, false, service.ShouldIgnoreData(nodeARoot, pastSlot))
+	})
+
+	t.Run("parent not in forkchoice", func(t *testing.T) {
+		unknownRoot := [32]byte{99}
+		require.Equal(t, false, service.ShouldIgnoreData(unknownRoot, currentSlot))
+	})
+
+	t.Run("parent epoch at or after justified", func(t *testing.T) {
+		// nodeB is at epoch 1, justified is epoch 1 => parentEpoch >= justified => false
+		require.Equal(t, false, service.ShouldIgnoreData(nodeBRoot, currentSlot))
+	})
+
+	t.Run("canonical parent before justified is ignored", func(t *testing.T) {
+		// nodeA is at epoch 0 < justified epoch 1, and is canonical => true
+		require.Equal(t, true, service.ShouldIgnoreData(nodeARoot, currentSlot))
+	})
+
+	t.Run("non-canonical parent before justified is not ignored", func(t *testing.T) {
+		// Insert a fork: nodeD at slot 2 (epoch 0) branching from nodeA, not on the canonical chain.
+		nodeDRoot := [32]byte{4}
+		stD, robD, err := prepareForkchoiceState(ctx, 2, nodeDRoot, nodeARoot, [32]byte{13}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]}, &ethpb.Checkpoint{Epoch: 0, Root: zeroHash[:]})
+		require.NoError(t, err)
+		require.NoError(t, fcs.InsertNode(ctx, stD, robD))
+
+		// nodeD is at epoch 0 < justified epoch 1, but not canonical => false
+		require.Equal(t, false, service.ShouldIgnoreData(nodeDRoot, currentSlot))
+	})
+}
+
+func Test_hashForGenesisRoot(t *testing.T) {
+	beaconDB := testDB.SetupDB(t)
+	ctx := t.Context()
+	c := setupBeaconChain(t, beaconDB)
+	st, _ := util.DeterministicGenesisStateElectra(t, 10)
+	genesis.StoreDuringTest(t, genesis.GenesisData{State: st})
+	require.NoError(t, c.cfg.BeaconDB.SaveGenesisData(ctx, st))
+	root, err := beaconDB.GenesisBlockRoot(ctx)
+	require.NoError(t, err)
+	genRoot, err := c.hashForGenesisBlock(ctx, [32]byte{'a'})
+	require.ErrorIs(t, err, errNotGenesisRoot)
+	require.IsNil(t, genRoot)
+
+	genRoot, err = c.hashForGenesisBlock(ctx, root)
+	require.NoError(t, err)
+	require.Equal(t, [32]byte{}, [32]byte(genRoot))
+}
+
+func Test_hashForGenesisRoot_Gloas(t *testing.T) {
+	beaconDB := testDB.SetupDB(t)
+	ctx := t.Context()
+	c := setupBeaconChain(t, beaconDB)
+
+	expectedHash := [32]byte{1, 2, 3, 4, 5}
+	st, err := state_native.InitializeFromProtoGloas(&ethpb.BeaconStateGloas{
+		LatestBlockHash: expectedHash[:],
+	})
+	require.NoError(t, err)
+	genesis.StoreDuringTest(t, genesis.GenesisData{State: st})
+
+	genesisRoot := [32]byte{0xaa}
+	require.NoError(t, beaconDB.SaveGenesisBlockRoot(ctx, genesisRoot))
+
+	genHash, err := c.hashForGenesisBlock(ctx, genesisRoot)
+	require.NoError(t, err)
+	require.Equal(t, expectedHash, [32]byte(genHash))
+}
+
+type mockSyncChecker struct {
+	synced bool
+}
+
+func (m mockSyncChecker) Synced() bool {
+	return m.synced
+}
+
+func TestCanWaitForGossipSidecars(t *testing.T) {
+	const currentSlot = primitives.Slot(100)
+
+	tests := []struct {
+		name   string
+		slot   primitives.Slot
+		synced bool
+		want   bool
+	}{
+		{name: "current slot", synced: true, slot: currentSlot, want: true},
+		{name: "previous slot", synced: true, slot: currentSlot - 1, want: true},
+		{name: "future slot", synced: true, slot: currentSlot + 1, want: true},
+		{name: "two slots behind", synced: true, slot: currentSlot - 2, want: false},
+		{name: "far behind", synced: true, slot: currentSlot - 30, want: false},
+		{name: "initial sync, current slot", synced: false, slot: currentSlot, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{cfg: &config{SyncChecker: mockSyncChecker{synced: tt.synced}}}
+			s.SetGenesisTime(time.Now().Add(time.Duration(-1*int64(currentSlot)*int64(params.BeaconConfig().SecondsPerSlot)) * time.Second))
+			require.Equal(t, tt.want, s.canWaitForGossipSidecars(tt.slot))
+		})
+	}
+}

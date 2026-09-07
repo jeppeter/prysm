@@ -1,0 +1,209 @@
+package verification
+
+import (
+	"context"
+	"sync"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/blockchain/kzg"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/peerdas"
+	forkchoicetypes "github.com/OffchainLabs/prysm/v7/beacon-chain/forkchoice/types"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/startup"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/interfaces"
+	payloadattestation "github.com/OffchainLabs/prysm/v7/consensus-types/payload-attestation"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"golang.org/x/sync/singleflight"
+)
+
+// Forkchoicer represents the forkchoice methods that the verifiers need.
+// Note that forkchoice is used here in a lock-free fashion, assuming that a version of forkchoice
+// is given that internally handles the details of locking the underlying store.
+type Forkchoicer interface {
+	FinalizedCheckpoint() *forkchoicetypes.Checkpoint
+	HasNode([32]byte) bool
+	IsCanonical(root [32]byte) bool
+	Slot([32]byte) (primitives.Slot, error)
+	DependentRootForEpoch([32]byte, primitives.Epoch) ([32]byte, error)
+	TargetRootForEpoch([32]byte, primitives.Epoch) ([32]byte, error)
+}
+
+// StateByRooter describes a stategen-ish type that can produce arbitrary states by their root
+type StateByRooter interface {
+	StateByRoot(ctx context.Context, blockRoot [32]byte) (state.BeaconState, error)
+	StateByRootIfCachedNoCopy(blockRoot [32]byte) state.ReadOnlyBeaconState
+}
+
+// HeadStateProvider describes a type that can provide access to the current head state and related methods.
+// This interface matches blockchain.HeadFetcher but is defined here to avoid import cycles
+// (blockchain package imports verification package).
+type HeadStateProvider interface {
+	HeadRoot(ctx context.Context) ([]byte, error)
+	HeadSlot() primitives.Slot
+	HeadState(ctx context.Context) (state.BeaconState, error)
+	HeadStateReadOnly(ctx context.Context) (state.ReadOnlyBeaconState, error)
+}
+
+// sharedResources provides access to resources that are required by different verification types.
+// for example, sidecar verification and block verification share the block signature verification cache.
+type sharedResources struct {
+	clock *startup.Clock
+	fc    Forkchoicer
+	sc    signatureCache
+	pc    proposerCache
+	sr    StateByRooter
+	hsp   HeadStateProvider
+	ic    *inclusionProofCache
+	sg    singleflight.Group
+}
+
+// Initializer is used to create different Verifiers.
+// Verifiers require access to stateful data structures, like caches,
+// and it is Initializer's job to provide access to those.
+type Initializer struct {
+	shared *sharedResources
+}
+
+// NewBlobVerifier creates a BlobVerifier for a single blob, with the given set of requirements.
+func (ini *Initializer) NewBlobVerifier(b blocks.ROBlob, reqs []Requirement) *ROBlobVerifier {
+	return &ROBlobVerifier{
+		sharedResources:      ini.shared,
+		blob:                 b,
+		results:              newResults(reqs...),
+		verifyBlobCommitment: kzg.Verify,
+	}
+}
+
+// NewDataColumnsVerifier creates a DataColumnVerifier for a slice of data columns, with the given set of requirements.
+// WARNING: The returned verifier is not thread-safe, and should not be used concurrently.
+func (ini *Initializer) NewDataColumnsVerifier(roDataColumns []blocks.RODataColumn, reqs []Requirement) *RODataColumnsVerifier {
+	return &RODataColumnsVerifier{
+		sharedResources: ini.shared,
+		dataColumns:     roDataColumns,
+		results:         newResults(reqs...),
+		verifyDataColumnsCommitment: func(rc []blocks.RODataColumn) error {
+			if len(rc) == 0 {
+				return nil
+			}
+			bundles, err := blocks.RODataColumnsToCellProofBundles(rc)
+			if err != nil {
+				return err
+			}
+			return peerdas.VerifyDataColumnsCellsKZGProofs(bundles)
+		},
+		stateByRoot: make(map[[fieldparams.RootLength]byte]state.BeaconState),
+	}
+}
+
+// NewPayloadAttestationMsgVerifier creates a PayloadAttestationMsgVerifier for a single payload attestation message,
+// with the given set of requirements.
+func (ini *Initializer) NewPayloadAttestationMsgVerifier(pa payloadattestation.ROMessage, reqs []Requirement) *PayloadAttMsgVerifier {
+	return &PayloadAttMsgVerifier{
+		sharedResources: ini.shared,
+		results:         newResults(reqs...),
+		pa:              pa,
+	}
+}
+
+// NewSignedProposerPreferencesVerifier creates a SignedProposerPreferencesVerifier for a single signed proposer preferences
+// message, with the given set of requirements.
+func (ini *Initializer) NewSignedProposerPreferencesVerifier(p *ethpb.SignedProposerPreferences, reqs []Requirement) *ProposerPreferencesVerifier {
+	return &ProposerPreferencesVerifier{
+		sharedResources: ini.shared,
+		results:         newResults(reqs...),
+		p:               p,
+	}
+}
+
+// NewExecutionPayloadBidVerifier creates an ExecutionPayloadBidVerifier for a single signed execution payload bid
+// with the given set of requirements.
+func (ini *Initializer) NewExecutionPayloadBidVerifier(b interfaces.ROSignedExecutionPayloadBid, reqs []Requirement) *BidVerifier {
+	return &BidVerifier{
+		sharedResources: ini.shared,
+		results:         newResults(reqs...),
+		b:               b,
+	}
+}
+
+// NewPayloadEnvelopeVerifier creates a SignedExecutionPayloadEnvelopeVerifier for a single signed execution payload envelope with the given set of requirements.
+func (ini *Initializer) NewPayloadEnvelopeVerifier(ee interfaces.ROSignedExecutionPayloadEnvelope, reqs []Requirement) *EnvelopeVerifier {
+	return &EnvelopeVerifier{
+		results: newResults(reqs...),
+		e:       ee,
+	}
+}
+
+// InitializerWaiter provides an Initializer once all dependent resources are ready
+// via the WaitForInitializer method.
+type InitializerWaiter struct {
+	sync.RWMutex
+	ready   bool
+	cw      startup.ClockWaiter
+	ini     *Initializer
+	getFork forkLookup
+}
+
+type forkLookup func(targetEpoch primitives.Epoch) (*ethpb.Fork, error)
+
+type InitializerOption func(waiter *InitializerWaiter)
+
+// WithForkLookup allows tests to modify how Fork consensus type lookup works. Needed for spectests with weird Forks.
+func WithForkLookup(fl forkLookup) InitializerOption {
+	return func(iw *InitializerWaiter) {
+		iw.getFork = fl
+	}
+}
+
+// NewInitializerWaiter creates an InitializerWaiter which can be used to obtain an Initializer once async dependencies are ready.
+func NewInitializerWaiter(cw startup.ClockWaiter, fc Forkchoicer, sr StateByRooter, hsp HeadStateProvider, opts ...InitializerOption) *InitializerWaiter {
+	pc := newPropCache()
+	// signature cache is initialized in WaitForInitializer, since we need the genesis validators root, which can be obtained from startup.Clock.
+	shared := &sharedResources{
+		fc:  fc,
+		pc:  pc,
+		sr:  sr,
+		hsp: hsp,
+		ic:  newInclusionProofCache(defaultInclusionProofCacheSize),
+	}
+	iw := &InitializerWaiter{cw: cw, ini: &Initializer{shared: shared}}
+	for _, o := range opts {
+		o(iw)
+	}
+	if iw.getFork == nil {
+		iw.getFork = params.Fork
+	}
+	return iw
+}
+
+// WaitForInitializer ensures that asynchronous initialization of the shared resources the initializer
+// depends on has completed before the underlying Initializer is accessible by client code.
+func (w *InitializerWaiter) WaitForInitializer(ctx context.Context) (*Initializer, error) {
+	if err := w.waitForReady(ctx); err != nil {
+		return nil, err
+	}
+	// We wait until this point to initialize the signature cache because here we have access to the genesis validator root.
+	vr := w.ini.shared.clock.GenesisValidatorsRoot()
+	sc := newSigCache(vr[:], defaultSignatureCacheSize, w.getFork)
+	w.ini.shared.sc = sc
+	w.ini.shared.ic = newInclusionProofCache(defaultInclusionProofCacheSize)
+	return w.ini, nil
+}
+
+func (w *InitializerWaiter) waitForReady(ctx context.Context) error {
+	w.Lock()
+	defer w.Unlock()
+	if w.ready {
+		return nil
+	}
+
+	clock, err := w.cw.WaitForClock(ctx)
+	if err != nil {
+		return err
+	}
+	w.ini.shared.clock = clock
+	w.ready = true
+	return nil
+}

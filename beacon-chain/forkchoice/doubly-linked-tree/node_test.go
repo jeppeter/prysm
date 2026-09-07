@@ -1,0 +1,358 @@
+package doublylinkedtree
+
+import (
+	"testing"
+	"time"
+
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/forkchoice"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/testing/assert"
+	"github.com/OffchainLabs/prysm/v7/testing/require"
+)
+
+func TestNode_ApplyWeightChanges_PositiveChange(t *testing.T) {
+	f := setup(0, 0)
+	ctx := t.Context()
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 2, indexToHash(2), indexToHash(1), params.BeaconConfig().ZeroHash, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 3, indexToHash(3), indexToHash(2), params.BeaconConfig().ZeroHash, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+
+	// The updated balances of each node is 100
+	s := f.store
+
+	s.emptyNodeByRoot[indexToHash(1)].balance = 100
+	s.emptyNodeByRoot[indexToHash(2)].balance = 100
+	s.emptyNodeByRoot[indexToHash(3)].balance = 100
+
+	assert.NoError(t, s.applyWeightChangesConsensusNode(ctx, s.treeRootNode))
+
+	assert.Equal(t, uint64(300), s.emptyNodeByRoot[indexToHash(1)].node.weight)
+	assert.Equal(t, uint64(200), s.emptyNodeByRoot[indexToHash(2)].node.weight)
+	assert.Equal(t, uint64(100), s.emptyNodeByRoot[indexToHash(3)].node.weight)
+}
+
+func TestNode_ApplyWeightChanges_NegativeChange(t *testing.T) {
+	f := setup(0, 0)
+	ctx := t.Context()
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 2, indexToHash(2), indexToHash(1), params.BeaconConfig().ZeroHash, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 3, indexToHash(3), indexToHash(2), params.BeaconConfig().ZeroHash, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+
+	// The updated balances of each node is 100
+	s := f.store
+	s.emptyNodeByRoot[indexToHash(1)].weight = 400
+	s.emptyNodeByRoot[indexToHash(2)].weight = 400
+	s.emptyNodeByRoot[indexToHash(3)].weight = 400
+
+	s.emptyNodeByRoot[indexToHash(1)].balance = 100
+	s.emptyNodeByRoot[indexToHash(2)].balance = 100
+	s.emptyNodeByRoot[indexToHash(3)].balance = 100
+
+	assert.NoError(t, s.applyWeightChangesConsensusNode(ctx, s.treeRootNode))
+
+	assert.Equal(t, uint64(300), s.emptyNodeByRoot[indexToHash(1)].node.weight)
+	assert.Equal(t, uint64(200), s.emptyNodeByRoot[indexToHash(2)].node.weight)
+	assert.Equal(t, uint64(100), s.emptyNodeByRoot[indexToHash(3)].node.weight)
+}
+
+func TestNode_UpdateBestDescendant_NonViableChild(t *testing.T) {
+	f := setup(1, 1)
+	ctx := t.Context()
+	// Input child is not viable.
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 2, 3)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+
+	// Verify parent's best child and best descendant are `none`.
+	s := f.store
+	assert.Equal(t, 1, len(s.allConsensusChildren(s.treeRootNode)))
+	nilBestDescendant := s.treeRootNode.bestDescendant == nil
+	assert.Equal(t, true, nilBestDescendant)
+}
+
+func TestNode_UpdateBestDescendant_ViableChild(t *testing.T) {
+	f := setup(1, 1)
+	ctx := t.Context()
+	// Input child is the best descendant
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+
+	s := f.store
+	children := s.allConsensusChildren(s.treeRootNode)
+	assert.Equal(t, 1, len(children))
+	assert.Equal(t, children[0], s.treeRootNode.bestDescendant)
+}
+
+func TestNode_UpdateBestDescendant_HigherWeightChild(t *testing.T) {
+	f := setup(1, 1)
+	ctx := t.Context()
+	// Input child is the best descendant
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 2, indexToHash(2), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+
+	s := f.store
+	s.emptyNodeByRoot[indexToHash(1)].weight = 100
+	s.emptyNodeByRoot[indexToHash(2)].weight = 200
+	assert.NoError(t, s.updateBestDescendantConsensusNode(ctx, s.treeRootNode, 1, 1, 1))
+
+	children := s.allConsensusChildren(s.treeRootNode)
+	assert.Equal(t, 2, len(children))
+	assert.Equal(t, children[1], s.treeRootNode.bestDescendant)
+}
+
+func TestNode_UpdateBestDescendant_LowerWeightChild(t *testing.T) {
+	f := setup(1, 1)
+	ctx := t.Context()
+	// Input child is the best descendant
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, indexToHash(101), 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 2, indexToHash(2), params.BeaconConfig().ZeroHash, indexToHash(102), 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+
+	s := f.store
+	s.emptyNodeByRoot[indexToHash(1)].node.weight = 200
+	s.emptyNodeByRoot[indexToHash(2)].node.weight = 100
+	assert.NoError(t, s.updateBestDescendantConsensusNode(ctx, s.treeRootNode, 1, 1, 1))
+
+	children := s.allConsensusChildren(s.treeRootNode)
+	assert.Equal(t, 2, len(children))
+	assert.Equal(t, children[0], s.treeRootNode.bestDescendant)
+}
+
+func TestNode_ViableForHead(t *testing.T) {
+	tests := []struct {
+		n              *Node
+		justifiedEpoch primitives.Epoch
+		want           bool
+	}{
+		{&Node{}, 0, true},
+		{&Node{}, 1, false},
+		{&Node{finalizedEpoch: 1, justifiedEpoch: 1}, 1, true},
+		{&Node{finalizedEpoch: 1, justifiedEpoch: 1}, 2, false},
+		{&Node{finalizedEpoch: 1, justifiedEpoch: 2}, 3, false},
+		{&Node{finalizedEpoch: 1, justifiedEpoch: 2}, 4, false},
+		{&Node{finalizedEpoch: 1, justifiedEpoch: 3}, 4, true},
+	}
+	for _, tc := range tests {
+		got := tc.n.viableForHead(tc.justifiedEpoch, 5)
+		assert.Equal(t, tc.want, got)
+	}
+}
+
+func TestNode_LeadsToViableHead(t *testing.T) {
+	f := setup(4, 3)
+	ctx := t.Context()
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 2, indexToHash(2), params.BeaconConfig().ZeroHash, params.BeaconConfig().ZeroHash, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 3, indexToHash(3), indexToHash(1), params.BeaconConfig().ZeroHash, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 4, indexToHash(4), indexToHash(2), params.BeaconConfig().ZeroHash, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	state, blk, err = prepareForkchoiceState(ctx, 5, indexToHash(5), indexToHash(3), params.BeaconConfig().ZeroHash, 4, 3)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+
+	require.Equal(t, true, f.store.treeRootNode.leadsToViableHead(4, 5))
+	require.Equal(t, true, f.store.emptyNodeByRoot[indexToHash(5)].node.leadsToViableHead(4, 5))
+	require.Equal(t, false, f.store.emptyNodeByRoot[indexToHash(2)].node.leadsToViableHead(4, 5))
+	require.Equal(t, false, f.store.emptyNodeByRoot[indexToHash(4)].node.leadsToViableHead(4, 5))
+}
+
+func TestNode_SetFullyValidated(t *testing.T) {
+	f := setup(1, 1)
+	ctx := t.Context()
+	storeNodes := make([]*PayloadNode, 6)
+	storeNodes[0] = f.store.fullNodeByRoot[params.BeaconConfig().ZeroHash]
+	// insert blocks in the fork pattern (optimistic status in parenthesis)
+	//
+	// 0 (false) -- 1 (false) -- 2 (false) -- 3 (true) -- 4 (true)
+	//               \
+	//                 -- 5 (true)
+	//
+	state, blk, err := prepareForkchoiceState(ctx, 1, indexToHash(1), params.BeaconConfig().ZeroHash, indexToHash(101), 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	storeNodes[1] = f.store.fullNodeByRoot[blk.Root()]
+	require.NoError(t, f.SetOptimisticToValid(ctx, indexToHash(1)))
+	state, blk, err = prepareForkchoiceState(ctx, 2, indexToHash(2), indexToHash(1), indexToHash(102), 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	storeNodes[2] = f.store.fullNodeByRoot[blk.Root()]
+	require.NoError(t, f.SetOptimisticToValid(ctx, indexToHash(2)))
+	state, blk, err = prepareForkchoiceState(ctx, 3, indexToHash(3), indexToHash(2), indexToHash(103), 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	storeNodes[3] = f.store.fullNodeByRoot[blk.Root()]
+	state, blk, err = prepareForkchoiceState(ctx, 4, indexToHash(4), indexToHash(3), indexToHash(104), 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	storeNodes[4] = f.store.fullNodeByRoot[blk.Root()]
+	state, blk, err = prepareForkchoiceState(ctx, 5, indexToHash(5), indexToHash(1), indexToHash(105), 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	storeNodes[5] = f.store.fullNodeByRoot[blk.Root()]
+
+	opt, err := f.IsOptimistic(indexToHash(5))
+	require.NoError(t, err)
+	require.Equal(t, true, opt)
+
+	opt, err = f.IsOptimistic(indexToHash(4))
+	require.NoError(t, err)
+	require.Equal(t, true, opt)
+
+	require.NoError(t, f.store.setNodeAndParentValidated(ctx, f.store.fullNodeByRoot[indexToHash(4)]))
+
+	// block 5 should still be optimistic
+	opt, err = f.IsOptimistic(indexToHash(5))
+	require.NoError(t, err)
+	require.Equal(t, true, opt)
+
+	// block 4 and 3 should now be valid
+	opt, err = f.IsOptimistic(indexToHash(4))
+	require.NoError(t, err)
+	require.Equal(t, false, opt)
+
+	opt, err = f.IsOptimistic(indexToHash(3))
+	require.NoError(t, err)
+	require.Equal(t, false, opt)
+
+	respNodes := make([]*forkchoice.Node, 0)
+	respNodes, err = f.store.nodeTreeDump(ctx, f.store.treeRootNode, respNodes)
+	require.NoError(t, err)
+	require.Equal(t, len(respNodes), f.NodeCount())
+
+	for i, respNode := range respNodes {
+		require.Equal(t, storeNodes[i].node.slot, respNode.Slot)
+		require.DeepEqual(t, storeNodes[i].node.root[:], respNode.BlockRoot)
+		require.Equal(t, storeNodes[i].node.balance, respNode.Balance)
+		require.Equal(t, storeNodes[i].node.weight, respNode.Weight)
+		require.Equal(t, storeNodes[i].optimistic, respNode.ExecutionOptimistic)
+		require.Equal(t, storeNodes[i].node.justifiedEpoch, respNode.JustifiedEpoch)
+		require.Equal(t, storeNodes[i].node.unrealizedJustifiedEpoch, respNode.UnrealizedJustifiedEpoch)
+		require.Equal(t, storeNodes[i].node.finalizedEpoch, respNode.FinalizedEpoch)
+		require.Equal(t, storeNodes[i].node.unrealizedFinalizedEpoch, respNode.UnrealizedFinalizedEpoch)
+		require.Equal(t, storeNodes[i].timestamp, respNode.Timestamp)
+	}
+}
+
+func TestNode_TimeStampsChecks(t *testing.T) {
+	f := setup(0, 0)
+	ctx := t.Context()
+
+	// early block
+	driftGenesisTime(f, 1, time.Second)
+	root := [32]byte{'a'}
+	f.justifiedBalances = []uint64{10}
+	state, blk, err := prepareForkchoiceState(ctx, 1, root, params.BeaconConfig().ZeroHash, [32]byte{'A'}, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	headRoot, err := f.Head(ctx)
+	require.NoError(t, err)
+	require.Equal(t, root, headRoot)
+	early, err := f.store.choosePayloadContent(f.store.headNode).arrivedEarly(f.store.genesisTime)
+	require.NoError(t, err)
+	require.Equal(t, true, early)
+	late, err := f.store.choosePayloadContent(f.store.headNode).arrivedAfterOrphanCheck(f.store.genesisTime)
+	require.NoError(t, err)
+	require.Equal(t, false, late)
+
+	orphanLateBlockFirstThreshold := time.Duration(params.BeaconConfig().SecondsPerSlot/params.BeaconConfig().IntervalsPerSlot) * time.Second
+	// late block
+	driftGenesisTime(f, 2, orphanLateBlockFirstThreshold+time.Second)
+	root = [32]byte{'b'}
+	state, blk, err = prepareForkchoiceState(ctx, 2, root, [32]byte{'a'}, [32]byte{'B'}, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	headRoot, err = f.Head(ctx)
+	require.NoError(t, err)
+	require.Equal(t, root, headRoot)
+	early, err = f.store.choosePayloadContent(f.store.headNode).arrivedEarly(f.store.genesisTime)
+	require.NoError(t, err)
+	require.Equal(t, false, early)
+	late, err = f.store.choosePayloadContent(f.store.headNode).arrivedAfterOrphanCheck(f.store.genesisTime)
+	require.NoError(t, err)
+	require.Equal(t, false, late)
+
+	// very late block
+	driftGenesisTime(f, 3, ProcessAttestationsThreshold+time.Second)
+	root = [32]byte{'c'}
+	state, blk, err = prepareForkchoiceState(ctx, 3, root, [32]byte{'b'}, [32]byte{'C'}, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	headRoot, err = f.Head(ctx)
+	require.NoError(t, err)
+	require.Equal(t, root, headRoot)
+	early, err = f.store.choosePayloadContent(f.store.headNode).arrivedEarly(f.store.genesisTime)
+	require.NoError(t, err)
+	require.Equal(t, false, early)
+	late, err = f.store.choosePayloadContent(f.store.headNode).arrivedAfterOrphanCheck(f.store.genesisTime)
+	require.NoError(t, err)
+	require.Equal(t, true, late)
+
+	// block from the future
+	root = [32]byte{'d'}
+	state, blk, err = prepareForkchoiceState(ctx, 5, root, [32]byte{'c'}, [32]byte{'D'}, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, f.InsertNode(ctx, state, blk))
+	headRoot, err = f.Head(ctx)
+	require.NoError(t, err)
+	require.Equal(t, root, headRoot)
+	early, err = f.store.choosePayloadContent(f.store.headNode).arrivedEarly(f.store.genesisTime)
+	require.ErrorContains(t, "invalid timestamp", err)
+	require.Equal(t, true, early)
+	late, err = f.store.choosePayloadContent(f.store.headNode).arrivedAfterOrphanCheck(f.store.genesisTime)
+	require.ErrorContains(t, "invalid timestamp", err)
+	require.Equal(t, false, late)
+}
+
+func TestNode_ArrivedEarlyGloas(t *testing.T) {
+	params.SetupTestConfigCleanup(t)
+	cfg := params.BeaconConfig().Copy()
+	cfg.GloasForkEpoch = 1
+	params.OverrideBeaconConfig(cfg)
+
+	genesis := time.Now().Truncate(time.Second)
+	offset := 3500 * time.Millisecond
+	for _, tc := range []struct {
+		name  string
+		slot  primitives.Slot
+		early bool
+	}{
+		{"pre-gloas slot is early", 1, true},
+		{"gloas slot is late", primitives.Slot(cfg.SlotsPerEpoch), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slotStart := genesis.Add(time.Duration(uint64(tc.slot)*cfg.SlotDurationMillis()) * time.Millisecond)
+			n := &PayloadNode{node: &Node{slot: tc.slot}, timestamp: slotStart.Add(offset)}
+			early, err := n.arrivedEarly(genesis)
+			require.NoError(t, err)
+			require.Equal(t, tc.early, early)
+		})
+	}
+}

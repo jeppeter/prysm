@@ -1,0 +1,103 @@
+package accounts
+
+import (
+	"io"
+	"strings"
+
+	grpcutil "github.com/OffchainLabs/prysm/v7/api/grpc"
+	"github.com/OffchainLabs/prysm/v7/cmd"
+	"github.com/OffchainLabs/prysm/v7/cmd/validator/flags"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/OffchainLabs/prysm/v7/validator/accounts"
+	"github.com/OffchainLabs/prysm/v7/validator/accounts/wallet"
+	"github.com/OffchainLabs/prysm/v7/validator/client"
+	"github.com/OffchainLabs/prysm/v7/validator/keymanager"
+	remote_web3signer "github.com/OffchainLabs/prysm/v7/validator/keymanager/remote-web3signer"
+	"github.com/OffchainLabs/prysm/v7/validator/node"
+	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/pkg/errors"
+	"github.com/urfave/cli/v2"
+	"google.golang.org/grpc"
+)
+
+func Exit(c *cli.Context, r io.Reader) error {
+	var w *wallet.Wallet
+	var km keymanager.IKeymanager
+	var err error
+	dialOpts := client.ConstructDialOptions(
+		c.Int(cmd.GrpcMaxCallRecvMsgSizeFlag.Name),
+		c.String(flags.CertFlag.Name),
+		c.Uint(flags.GRPCRetriesFlag.Name),
+		c.Duration(flags.GRPCRetryDelayFlag.Name),
+	)
+	grpcHeaders := strings.Split(c.String(flags.GRPCHeadersFlag.Name), ",")
+	beaconRPCProvider := c.String(flags.BeaconRPCProviderFlag.Name)
+	if !c.IsSet(flags.Web3SignerURLFlag.Name) && !c.IsSet(flags.WalletDirFlag.Name) {
+		return errors.Errorf("No validators found, please provide a prysm wallet directory via flag --%s "+
+			"or a remote signer location with corresponding public keys via flags --%s and --%s ",
+			flags.WalletDirFlag.Name,
+			flags.Web3SignerURLFlag.Name,
+			flags.Web3SignerPublicValidatorKeysFlag,
+		)
+	}
+	if c.IsSet(flags.Web3SignerURLFlag.Name) {
+		ctx := grpcutil.AppendHeaders(c.Context, grpcHeaders)
+		conn, err := grpc.DialContext(ctx, beaconRPCProvider, dialOpts...)
+		if err != nil {
+			return errors.Wrapf(err, "could not dial endpoint %s", beaconRPCProvider)
+		}
+		nodeClient := ethpb.NewNodeClient(conn)
+		resp, err := nodeClient.GetGenesis(c.Context, &empty.Empty{})
+		if err != nil {
+			return errors.Wrapf(err, "failed to get genesis info")
+		}
+		if err := conn.Close(); err != nil {
+			log.WithError(err).Error("Failed to close connection")
+		}
+		config, err := node.Web3SignerConfig(c)
+		if err != nil {
+			return errors.Wrapf(err, "could not configure remote signer")
+		}
+		config.GenesisValidatorsRoot = resp.GenesisValidatorsRoot
+		km, err = remote_web3signer.NewKeymanager(c.Context, config)
+		if err != nil {
+			return err
+		}
+		w = &wallet.Wallet{}
+	} else {
+		w, km, err = walletWithKeymanager(c)
+		if err != nil {
+			return err
+		}
+	}
+
+	opts := []accounts.Option{
+		accounts.WithWallet(w),
+		accounts.WithKeymanager(km),
+		accounts.WithGRPCDialOpts(dialOpts),
+		accounts.WithBeaconRPCProvider(beaconRPCProvider),
+		accounts.WithBeaconRESTApiProvider(c.String(flags.BeaconRESTApiProviderFlag.Name)),
+		accounts.WithGRPCHeaders(grpcHeaders),
+		accounts.WithExitJSONOutputPath(c.String(flags.VoluntaryExitJSONOutputPathFlag.Name)),
+	}
+	// Get full set of public keys from the keymanager.
+	validatingPublicKeys, err := km.FetchValidatingPublicKeys(c.Context)
+	if err != nil {
+		return err
+	}
+	if len(validatingPublicKeys) == 0 {
+		return errors.New("wallet is empty, no accounts to delete")
+	}
+	// Filter keys either from CLI flag or from interactive session.
+	rawPubKey, formattedPubKeys, err := accounts.FilterExitAccountsFromUserInput(c, r, validatingPublicKeys, c.Bool(flags.ForceExitFlag.Name))
+	if err != nil {
+		return errors.Wrap(err, "could not filter public keys for deletion")
+	}
+	opts = append(opts, accounts.WithRawPubKeys(rawPubKey))
+	opts = append(opts, accounts.WithFormattedPubKeys(formattedPubKeys))
+	acc, err := accounts.NewCLIManager(opts...)
+	if err != nil {
+		return err
+	}
+	return acc.Exit(c.Context)
+}

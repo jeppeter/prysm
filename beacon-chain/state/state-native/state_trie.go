@@ -1,0 +1,1724 @@
+package state_native
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"math/bits"
+	"runtime"
+	"slices"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state/fieldtrie"
+	customtypes "github.com/OffchainLabs/prysm/v7/beacon-chain/state/state-native/custom-types"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state/state-native/types"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state/stateutil"
+	"github.com/OffchainLabs/prysm/v7/config/features"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	mvslice "github.com/OffchainLabs/prysm/v7/container/multi-value-slice"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	"github.com/OffchainLabs/prysm/v7/encoding/ssz"
+	"github.com/OffchainLabs/prysm/v7/monitoring/tracing/trace"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/OffchainLabs/prysm/v7/proto/prysm/wrappers"
+	"github.com/OffchainLabs/prysm/v7/runtime/version"
+	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
+)
+
+var (
+	phase0Fields = []types.FieldIndex{
+		types.GenesisTime,
+		types.GenesisValidatorsRoot,
+		types.Slot,
+		types.Fork,
+		types.LatestBlockHeader,
+		types.BlockRoots,
+		types.StateRoots,
+		types.HistoricalRoots,
+		types.Eth1Data,
+		types.Eth1DataVotes,
+		types.Eth1DepositIndex,
+		types.Validators,
+		types.Balances,
+		types.RandaoMixes,
+		types.Slashings,
+		types.PreviousEpochAttestations,
+		types.CurrentEpochAttestations,
+		types.JustificationBits,
+		types.PreviousJustifiedCheckpoint,
+		types.CurrentJustifiedCheckpoint,
+		types.FinalizedCheckpoint,
+	}
+
+	altairFields = []types.FieldIndex{
+		types.GenesisTime,
+		types.GenesisValidatorsRoot,
+		types.Slot,
+		types.Fork,
+		types.LatestBlockHeader,
+		types.BlockRoots,
+		types.StateRoots,
+		types.HistoricalRoots,
+		types.Eth1Data,
+		types.Eth1DataVotes,
+		types.Eth1DepositIndex,
+		types.Validators,
+		types.Balances,
+		types.RandaoMixes,
+		types.Slashings,
+		types.PreviousEpochParticipationBits,
+		types.CurrentEpochParticipationBits,
+		types.JustificationBits,
+		types.PreviousJustifiedCheckpoint,
+		types.CurrentJustifiedCheckpoint,
+		types.FinalizedCheckpoint,
+		types.InactivityScores,
+		types.CurrentSyncCommittee,
+		types.NextSyncCommittee,
+	}
+
+	bellatrixFields = append(altairFields, types.LatestExecutionPayloadHeader)
+
+	withdrawalAndHistoricalSummaryFields = []types.FieldIndex{
+		types.NextWithdrawalIndex,
+		types.NextWithdrawalValidatorIndex,
+		types.HistoricalSummaries,
+	}
+
+	capellaFields = slices.Concat(
+		altairFields,
+		[]types.FieldIndex{types.LatestExecutionPayloadHeaderCapella},
+		withdrawalAndHistoricalSummaryFields,
+	)
+
+	denebFields = slices.Concat(
+		altairFields,
+		[]types.FieldIndex{types.LatestExecutionPayloadHeaderDeneb},
+		withdrawalAndHistoricalSummaryFields,
+	)
+
+	electraAdditionalFields = []types.FieldIndex{
+		types.DepositRequestsStartIndex,
+		types.DepositBalanceToConsume,
+		types.ExitBalanceToConsume,
+		types.EarliestExitEpoch,
+		types.ConsolidationBalanceToConsume,
+		types.EarliestConsolidationEpoch,
+		types.PendingDeposits,
+		types.PendingPartialWithdrawals,
+		types.PendingConsolidations,
+	}
+
+	electraFields = slices.Concat(
+		denebFields,
+		electraAdditionalFields,
+	)
+
+	fuluFields = append(
+		electraFields,
+		types.ProposerLookahead,
+	)
+
+	gloasAdditionalFields = []types.FieldIndex{
+		types.Builders,
+		types.NextWithdrawalBuilderIndex,
+		types.ExecutionPayloadAvailability,
+		types.BuilderPendingPayments,
+		types.BuilderPendingWithdrawals,
+		types.LatestExecutionPayloadBid,
+		types.PayloadExpectedWithdrawals,
+		types.PTCWindow,
+	}
+
+	gloasFields = slices.Concat(
+		altairFields,
+		[]types.FieldIndex{types.LatestBlockHash},
+		withdrawalAndHistoricalSummaryFields,
+		electraAdditionalFields,
+		[]types.FieldIndex{types.ProposerLookahead},
+		gloasAdditionalFields,
+	)
+)
+
+// promotionThresholdByField defines absolute overlay promotion thresholds
+// for specific fields. Fields in this map override the defaultPromotionThreshold.
+// Fields not in this map use defaultPromotionThreshold (20,000).
+var promotionThresholdByField = map[types.FieldIndex]int{
+	types.BlockRoots:  2_000,
+	types.StateRoots:  2_000,
+	types.Validators:  2_000,
+	types.RandaoMixes: 100,
+}
+
+const (
+	phase0SharedFieldRefCount    = 5
+	altairSharedFieldRefCount    = 5
+	bellatrixSharedFieldRefCount = 6
+	capellaSharedFieldRefCount   = 7
+	denebSharedFieldRefCount     = 7
+	electraSharedFieldRefCount   = 10
+	fuluSharedFieldRefCount      = 11
+	gloasSharedFieldRefCount     = 14 // Adds Builders + BuilderPendingWithdrawals + PTCWindow to the shared-ref set and LatestExecutionPayloadHeader is removed
+)
+
+// InitializeFromProtoPhase0 the beacon state from a protobuf representation.
+func InitializeFromProtoPhase0(st *ethpb.BeaconState) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafePhase0(proto.Clone(st).(*ethpb.BeaconState))
+}
+
+// InitializeFromProtoAltair the beacon state from a protobuf representation.
+func InitializeFromProtoAltair(st *ethpb.BeaconStateAltair) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafeAltair(proto.Clone(st).(*ethpb.BeaconStateAltair))
+}
+
+// InitializeFromProtoBellatrix the beacon state from a protobuf representation.
+func InitializeFromProtoBellatrix(st *ethpb.BeaconStateBellatrix) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafeBellatrix(proto.Clone(st).(*ethpb.BeaconStateBellatrix))
+}
+
+// InitializeFromProtoCapella the beacon state from a protobuf representation.
+func InitializeFromProtoCapella(st *ethpb.BeaconStateCapella) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafeCapella(proto.Clone(st).(*ethpb.BeaconStateCapella))
+}
+
+// InitializeFromProtoDeneb the beacon state from a protobuf representation.
+func InitializeFromProtoDeneb(st *ethpb.BeaconStateDeneb) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafeDeneb(proto.Clone(st).(*ethpb.BeaconStateDeneb))
+}
+
+// InitializeFromProtoElectra the beacon state from a protobuf representation.
+func InitializeFromProtoElectra(st *ethpb.BeaconStateElectra) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafeElectra(proto.Clone(st).(*ethpb.BeaconStateElectra))
+}
+
+// InitializeFromProtoFulu the beacon state from a protobuf representation.
+func InitializeFromProtoFulu(st *ethpb.BeaconStateFulu) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafeFulu(proto.Clone(st).(*ethpb.BeaconStateFulu))
+}
+
+// InitializeFromProtoGloas the beacon state from a protobuf representation.
+func InitializeFromProtoGloas(st *ethpb.BeaconStateGloas) (state.BeaconState, error) {
+	return InitializeFromProtoUnsafeGloas(proto.Clone(st).(*ethpb.BeaconStateGloas))
+}
+
+// InitializeFromProtoUnsafePhase0 directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafePhase0(st *ethpb.BeaconState) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		copy(hRoots[i][:], r)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateFieldCount
+	b := &BeaconState{
+		version:                     version.Phase0,
+		genesisTime:                 st.GenesisTime,
+		genesisValidatorsRoot:       bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                        st.Slot,
+		fork:                        st.Fork,
+		latestBlockHeader:           st.LatestBlockHeader,
+		historicalRoots:             hRoots,
+		eth1Data:                    st.Eth1Data,
+		eth1DataVotes:               st.Eth1DataVotes,
+		eth1DepositIndex:            st.Eth1DepositIndex,
+		slashings:                   st.Slashings,
+		previousEpochAttestations:   st.PreviousEpochAttestations,
+		currentEpochAttestations:    st.CurrentEpochAttestations,
+		justificationBits:           st.JustificationBits,
+		previousJustifiedCheckpoint: st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:  st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:         st.FinalizedCheckpoint,
+
+		id: types.Enumerator.Inc(),
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:    stateutil.NewValMapHandler(st.Validators),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, phase0SharedFieldRefCount)
+
+	for _, f := range phase0Fields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochAttestations] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.CurrentEpochAttestations] = stateutil.NewRef(1)
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+	return b, nil
+}
+
+// InitializeFromProtoUnsafeAltair directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafeAltair(st *ethpb.BeaconStateAltair) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		hRoots[i] = bytesutil.ToBytes32(r)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateAltairFieldCount
+	b := &BeaconState{
+		version:                     version.Altair,
+		genesisTime:                 st.GenesisTime,
+		genesisValidatorsRoot:       bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                        st.Slot,
+		fork:                        st.Fork,
+		latestBlockHeader:           st.LatestBlockHeader,
+		historicalRoots:             hRoots,
+		eth1Data:                    st.Eth1Data,
+		eth1DataVotes:               st.Eth1DataVotes,
+		eth1DepositIndex:            st.Eth1DepositIndex,
+		slashings:                   st.Slashings,
+		previousEpochParticipation:  st.PreviousEpochParticipation,
+		currentEpochParticipation:   st.CurrentEpochParticipation,
+		justificationBits:           st.JustificationBits,
+		previousJustifiedCheckpoint: st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:  st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:         st.FinalizedCheckpoint,
+		currentSyncCommittee:        st.CurrentSyncCommittee,
+		nextSyncCommittee:           st.NextSyncCommittee,
+
+		id: types.Enumerator.Inc(),
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:    stateutil.NewValMapHandler(st.Validators),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.inactivityScoresMultiValue = NewMultiValueInactivityScores(st.InactivityScores)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, altairSharedFieldRefCount)
+
+	for _, f := range altairFields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochParticipationBits] = stateutil.NewRef(1) // New in Altair.
+	b.sharedFieldReferences[types.CurrentEpochParticipationBits] = stateutil.NewRef(1)  // New in Altair.
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+	return b, nil
+}
+
+// InitializeFromProtoUnsafeBellatrix directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafeBellatrix(st *ethpb.BeaconStateBellatrix) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		hRoots[i] = bytesutil.ToBytes32(r)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateBellatrixFieldCount
+	b := &BeaconState{
+		version:                      version.Bellatrix,
+		genesisTime:                  st.GenesisTime,
+		genesisValidatorsRoot:        bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                         st.Slot,
+		fork:                         st.Fork,
+		latestBlockHeader:            st.LatestBlockHeader,
+		historicalRoots:              hRoots,
+		eth1Data:                     st.Eth1Data,
+		eth1DataVotes:                st.Eth1DataVotes,
+		eth1DepositIndex:             st.Eth1DepositIndex,
+		slashings:                    st.Slashings,
+		previousEpochParticipation:   st.PreviousEpochParticipation,
+		currentEpochParticipation:    st.CurrentEpochParticipation,
+		justificationBits:            st.JustificationBits,
+		previousJustifiedCheckpoint:  st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:   st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:          st.FinalizedCheckpoint,
+		currentSyncCommittee:         st.CurrentSyncCommittee,
+		nextSyncCommittee:            st.NextSyncCommittee,
+		latestExecutionPayloadHeader: st.LatestExecutionPayloadHeader,
+
+		id: types.Enumerator.Inc(),
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:    stateutil.NewValMapHandler(st.Validators),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.inactivityScoresMultiValue = NewMultiValueInactivityScores(st.InactivityScores)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, bellatrixSharedFieldRefCount)
+
+	for _, f := range bellatrixFields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.CurrentEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.LatestExecutionPayloadHeader] = stateutil.NewRef(1) // New in Bellatrix.
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+	return b, nil
+}
+
+// InitializeFromProtoUnsafeCapella directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafeCapella(st *ethpb.BeaconStateCapella) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		hRoots[i] = bytesutil.ToBytes32(r)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateCapellaFieldCount
+	b := &BeaconState{
+		version:                             version.Capella,
+		genesisTime:                         st.GenesisTime,
+		genesisValidatorsRoot:               bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                                st.Slot,
+		fork:                                st.Fork,
+		latestBlockHeader:                   st.LatestBlockHeader,
+		historicalRoots:                     hRoots,
+		eth1Data:                            st.Eth1Data,
+		eth1DataVotes:                       st.Eth1DataVotes,
+		eth1DepositIndex:                    st.Eth1DepositIndex,
+		slashings:                           st.Slashings,
+		previousEpochParticipation:          st.PreviousEpochParticipation,
+		currentEpochParticipation:           st.CurrentEpochParticipation,
+		justificationBits:                   st.JustificationBits,
+		previousJustifiedCheckpoint:         st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:          st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:                 st.FinalizedCheckpoint,
+		currentSyncCommittee:                st.CurrentSyncCommittee,
+		nextSyncCommittee:                   st.NextSyncCommittee,
+		latestExecutionPayloadHeaderCapella: st.LatestExecutionPayloadHeader,
+		nextWithdrawalIndex:                 st.NextWithdrawalIndex,
+		nextWithdrawalValidatorIndex:        st.NextWithdrawalValidatorIndex,
+		historicalSummaries:                 st.HistoricalSummaries,
+
+		id: types.Enumerator.Inc(),
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:    stateutil.NewValMapHandler(st.Validators),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.inactivityScoresMultiValue = NewMultiValueInactivityScores(st.InactivityScores)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, capellaSharedFieldRefCount)
+
+	for _, f := range capellaFields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.CurrentEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.LatestExecutionPayloadHeaderCapella] = stateutil.NewRef(1) // New in Capella.
+	b.sharedFieldReferences[types.HistoricalSummaries] = stateutil.NewRef(1)                 // New in Capella.
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+	return b, nil
+}
+
+// InitializeFromProtoUnsafeDeneb directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafeDeneb(st *ethpb.BeaconStateDeneb) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		hRoots[i] = bytesutil.ToBytes32(r)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateDenebFieldCount
+	b := &BeaconState{
+		version:                           version.Deneb,
+		genesisTime:                       st.GenesisTime,
+		genesisValidatorsRoot:             bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                              st.Slot,
+		fork:                              st.Fork,
+		latestBlockHeader:                 st.LatestBlockHeader,
+		historicalRoots:                   hRoots,
+		eth1Data:                          st.Eth1Data,
+		eth1DataVotes:                     st.Eth1DataVotes,
+		eth1DepositIndex:                  st.Eth1DepositIndex,
+		slashings:                         st.Slashings,
+		previousEpochParticipation:        st.PreviousEpochParticipation,
+		currentEpochParticipation:         st.CurrentEpochParticipation,
+		justificationBits:                 st.JustificationBits,
+		previousJustifiedCheckpoint:       st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:        st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:               st.FinalizedCheckpoint,
+		currentSyncCommittee:              st.CurrentSyncCommittee,
+		nextSyncCommittee:                 st.NextSyncCommittee,
+		latestExecutionPayloadHeaderDeneb: st.LatestExecutionPayloadHeader,
+		nextWithdrawalIndex:               st.NextWithdrawalIndex,
+		nextWithdrawalValidatorIndex:      st.NextWithdrawalValidatorIndex,
+		historicalSummaries:               st.HistoricalSummaries,
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:    stateutil.NewValMapHandler(st.Validators),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.inactivityScoresMultiValue = NewMultiValueInactivityScores(st.InactivityScores)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, denebSharedFieldRefCount)
+
+	for _, f := range denebFields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.CurrentEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.LatestExecutionPayloadHeaderDeneb] = stateutil.NewRef(1) // New in Deneb.
+	b.sharedFieldReferences[types.HistoricalSummaries] = stateutil.NewRef(1)
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+	return b, nil
+}
+
+// InitializeFromProtoUnsafeElectra directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafeElectra(st *ethpb.BeaconStateElectra) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		hRoots[i] = bytesutil.ToBytes32(r)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateElectraFieldCount
+	b := &BeaconState{
+		version:                           version.Electra,
+		genesisTime:                       st.GenesisTime,
+		genesisValidatorsRoot:             bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                              st.Slot,
+		fork:                              st.Fork,
+		latestBlockHeader:                 st.LatestBlockHeader,
+		historicalRoots:                   hRoots,
+		eth1Data:                          st.Eth1Data,
+		eth1DataVotes:                     st.Eth1DataVotes,
+		eth1DepositIndex:                  st.Eth1DepositIndex,
+		slashings:                         st.Slashings,
+		previousEpochParticipation:        st.PreviousEpochParticipation,
+		currentEpochParticipation:         st.CurrentEpochParticipation,
+		justificationBits:                 st.JustificationBits,
+		previousJustifiedCheckpoint:       st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:        st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:               st.FinalizedCheckpoint,
+		currentSyncCommittee:              st.CurrentSyncCommittee,
+		nextSyncCommittee:                 st.NextSyncCommittee,
+		latestExecutionPayloadHeaderDeneb: st.LatestExecutionPayloadHeader,
+		nextWithdrawalIndex:               st.NextWithdrawalIndex,
+		nextWithdrawalValidatorIndex:      st.NextWithdrawalValidatorIndex,
+		historicalSummaries:               st.HistoricalSummaries,
+		depositRequestsStartIndex:         st.DepositRequestsStartIndex,
+		depositBalanceToConsume:           st.DepositBalanceToConsume,
+		exitBalanceToConsume:              st.ExitBalanceToConsume,
+		earliestExitEpoch:                 st.EarliestExitEpoch,
+		consolidationBalanceToConsume:     st.ConsolidationBalanceToConsume,
+		earliestConsolidationEpoch:        st.EarliestConsolidationEpoch,
+		pendingDeposits:                   st.PendingDeposits,
+		pendingPartialWithdrawals:         st.PendingPartialWithdrawals,
+		pendingConsolidations:             st.PendingConsolidations,
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:    stateutil.NewValMapHandler(st.Validators),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.inactivityScoresMultiValue = NewMultiValueInactivityScores(st.InactivityScores)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, electraSharedFieldRefCount)
+
+	for _, f := range electraFields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.CurrentEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.LatestExecutionPayloadHeaderDeneb] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.HistoricalSummaries] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PendingDeposits] = stateutil.NewRef(1)           // New in Electra.
+	b.sharedFieldReferences[types.PendingPartialWithdrawals] = stateutil.NewRef(1) // New in Electra.
+	b.sharedFieldReferences[types.PendingConsolidations] = stateutil.NewRef(1)     // New in Electra.
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+	return b, nil
+}
+
+// InitializeFromProtoUnsafeFulu directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafeFulu(st *ethpb.BeaconStateFulu) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		hRoots[i] = bytesutil.ToBytes32(r)
+	}
+
+	proposerLookahead := make([]primitives.ValidatorIndex, len(st.ProposerLookahead))
+	for i, v := range st.ProposerLookahead {
+		proposerLookahead[i] = primitives.ValidatorIndex(v)
+	}
+	// Proposer lookahead must be exactly 2 * SLOTS_PER_EPOCH in length. We fill in with zeroes instead of erroring out here
+	for i := len(proposerLookahead); i < 2*fieldparams.SlotsPerEpoch; i++ {
+		proposerLookahead = append(proposerLookahead, 0)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateFuluFieldCount
+	b := &BeaconState{
+		version:                           version.Fulu,
+		genesisTime:                       st.GenesisTime,
+		genesisValidatorsRoot:             bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                              st.Slot,
+		fork:                              st.Fork,
+		latestBlockHeader:                 st.LatestBlockHeader,
+		historicalRoots:                   hRoots,
+		eth1Data:                          st.Eth1Data,
+		eth1DataVotes:                     st.Eth1DataVotes,
+		eth1DepositIndex:                  st.Eth1DepositIndex,
+		slashings:                         st.Slashings,
+		previousEpochParticipation:        st.PreviousEpochParticipation,
+		currentEpochParticipation:         st.CurrentEpochParticipation,
+		justificationBits:                 st.JustificationBits,
+		previousJustifiedCheckpoint:       st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:        st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:               st.FinalizedCheckpoint,
+		currentSyncCommittee:              st.CurrentSyncCommittee,
+		nextSyncCommittee:                 st.NextSyncCommittee,
+		latestExecutionPayloadHeaderDeneb: st.LatestExecutionPayloadHeader,
+		nextWithdrawalIndex:               st.NextWithdrawalIndex,
+		nextWithdrawalValidatorIndex:      st.NextWithdrawalValidatorIndex,
+		historicalSummaries:               st.HistoricalSummaries,
+		depositRequestsStartIndex:         st.DepositRequestsStartIndex,
+		depositBalanceToConsume:           st.DepositBalanceToConsume,
+		exitBalanceToConsume:              st.ExitBalanceToConsume,
+		earliestExitEpoch:                 st.EarliestExitEpoch,
+		consolidationBalanceToConsume:     st.ConsolidationBalanceToConsume,
+		earliestConsolidationEpoch:        st.EarliestConsolidationEpoch,
+		pendingDeposits:                   st.PendingDeposits,
+		pendingPartialWithdrawals:         st.PendingPartialWithdrawals,
+		pendingConsolidations:             st.PendingConsolidations,
+		proposerLookahead:                 proposerLookahead,
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:    stateutil.NewValMapHandler(st.Validators),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.inactivityScoresMultiValue = NewMultiValueInactivityScores(st.InactivityScores)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, fuluSharedFieldRefCount)
+
+	for _, f := range fuluFields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.CurrentEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.LatestExecutionPayloadHeaderDeneb] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.HistoricalSummaries] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PendingDeposits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PendingPartialWithdrawals] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PendingConsolidations] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.ProposerLookahead] = stateutil.NewRef(1) // New in Fulu.
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+	return b, nil
+}
+
+// InitializeFromProtoUnsafeGloas directly uses the beacon state protobuf fields
+// and sets them as fields of the BeaconState type.
+func InitializeFromProtoUnsafeGloas(st *ethpb.BeaconStateGloas) (state.BeaconState, error) {
+	if st == nil {
+		return nil, errors.New("received nil state")
+	}
+
+	hRoots := customtypes.HistoricalRoots(make([][32]byte, len(st.HistoricalRoots)))
+	for i, r := range st.HistoricalRoots {
+		hRoots[i] = bytesutil.ToBytes32(r)
+	}
+
+	proposerLookahead := make([]primitives.ValidatorIndex, len(st.ProposerLookahead))
+	for i, v := range st.ProposerLookahead {
+		proposerLookahead[i] = primitives.ValidatorIndex(v)
+	}
+
+	fieldCount := params.BeaconConfig().BeaconStateGloasFieldCount
+	b := &BeaconState{
+		version:                       version.Gloas,
+		genesisTime:                   st.GenesisTime,
+		genesisValidatorsRoot:         bytesutil.ToBytes32(st.GenesisValidatorsRoot),
+		slot:                          st.Slot,
+		fork:                          st.Fork,
+		latestBlockHeader:             st.LatestBlockHeader,
+		historicalRoots:               hRoots,
+		eth1Data:                      st.Eth1Data,
+		eth1DataVotes:                 st.Eth1DataVotes,
+		eth1DepositIndex:              st.Eth1DepositIndex,
+		slashings:                     st.Slashings,
+		previousEpochParticipation:    st.PreviousEpochParticipation,
+		currentEpochParticipation:     st.CurrentEpochParticipation,
+		justificationBits:             st.JustificationBits,
+		previousJustifiedCheckpoint:   st.PreviousJustifiedCheckpoint,
+		currentJustifiedCheckpoint:    st.CurrentJustifiedCheckpoint,
+		finalizedCheckpoint:           st.FinalizedCheckpoint,
+		currentSyncCommittee:          st.CurrentSyncCommittee,
+		nextSyncCommittee:             st.NextSyncCommittee,
+		nextWithdrawalIndex:           st.NextWithdrawalIndex,
+		nextWithdrawalValidatorIndex:  st.NextWithdrawalValidatorIndex,
+		historicalSummaries:           st.HistoricalSummaries,
+		depositRequestsStartIndex:     st.DepositRequestsStartIndex,
+		depositBalanceToConsume:       st.DepositBalanceToConsume,
+		exitBalanceToConsume:          st.ExitBalanceToConsume,
+		earliestExitEpoch:             st.EarliestExitEpoch,
+		consolidationBalanceToConsume: st.ConsolidationBalanceToConsume,
+		earliestConsolidationEpoch:    st.EarliestConsolidationEpoch,
+		pendingDeposits:               st.PendingDeposits,
+		pendingPartialWithdrawals:     st.PendingPartialWithdrawals,
+		pendingConsolidations:         st.PendingConsolidations,
+		proposerLookahead:             proposerLookahead,
+		latestExecutionPayloadBid:     st.LatestExecutionPayloadBid,
+		builders:                      st.Builders,
+		nextWithdrawalBuilderIndex:    st.NextWithdrawalBuilderIndex,
+		executionPayloadAvailability:  st.ExecutionPayloadAvailability,
+		builderPendingPayments:        st.BuilderPendingPayments,
+		builderPendingWithdrawals:     st.BuilderPendingWithdrawals,
+		latestBlockHash:               st.LatestBlockHash,
+		payloadExpectedWithdrawals:    st.PayloadExpectedWithdrawals,
+		ptcWindow:                     st.PtcWindow,
+		dirtyFields:                   make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:                  make(map[types.FieldIndex][]uint64, fieldCount),
+		stateFieldLeaves:              make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+		rebuildTrie:                   make(map[types.FieldIndex]bool, fieldCount),
+		valMapHandler:                 stateutil.NewValMapHandler(st.Validators),
+		builderIdxMap:                 newBuilderIdxMap(st.Builders),
+	}
+
+	b.blockRootsMultiValue = NewMultiValueBlockRoots(st.BlockRoots)
+	b.stateRootsMultiValue = NewMultiValueStateRoots(st.StateRoots)
+	b.randaoMixesMultiValue = NewMultiValueRandaoMixes(st.RandaoMixes)
+	b.balancesMultiValue = NewMultiValueBalances(st.Balances)
+	b.validatorsMultiValue = NewMultiValueValidators(st.Validators)
+	b.inactivityScoresMultiValue = NewMultiValueInactivityScores(st.InactivityScores)
+	b.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, gloasSharedFieldRefCount)
+
+	for _, f := range gloasFields {
+		b.dirtyFields[f] = true
+		b.rebuildTrie[f] = true
+		b.dirtyIndices[f] = []uint64{}
+		dt, ok := fieldMap[f]
+		if !ok {
+			continue
+		}
+		trie, err := fieldtrie.NewFieldTrie(f, dt, nil, 0, promotionThresholdByField[f])
+		if err != nil {
+			return nil, err
+		}
+		b.stateFieldLeaves[f] = trie
+	}
+
+	// Initialize field reference tracking for shared data.
+	b.sharedFieldReferences[types.HistoricalRoots] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Eth1DataVotes] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Slashings] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PreviousEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.CurrentEpochParticipationBits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.HistoricalSummaries] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PendingDeposits] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PendingPartialWithdrawals] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.PendingConsolidations] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.ProposerLookahead] = stateutil.NewRef(1)
+	b.sharedFieldReferences[types.Builders] = stateutil.NewRef(1)                  // New in Gloas.
+	b.sharedFieldReferences[types.BuilderPendingWithdrawals] = stateutil.NewRef(1) // New in Gloas.
+	b.sharedFieldReferences[types.PTCWindow] = stateutil.NewRef(1)                 // New in Gloas.
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(b, finalizerCleanup)
+
+	return b, nil
+}
+
+// Copy returns a deep copy of the beacon state.
+func (b *BeaconState) Copy() state.BeaconState {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+
+	var fieldCount int
+	switch b.version {
+	case version.Phase0:
+		fieldCount = params.BeaconConfig().BeaconStateFieldCount
+	case version.Altair:
+		fieldCount = params.BeaconConfig().BeaconStateAltairFieldCount
+	case version.Bellatrix:
+		fieldCount = params.BeaconConfig().BeaconStateBellatrixFieldCount
+	case version.Capella:
+		fieldCount = params.BeaconConfig().BeaconStateCapellaFieldCount
+	case version.Deneb:
+		fieldCount = params.BeaconConfig().BeaconStateDenebFieldCount
+	case version.Electra:
+		fieldCount = params.BeaconConfig().BeaconStateElectraFieldCount
+	case version.Fulu:
+		fieldCount = params.BeaconConfig().BeaconStateFuluFieldCount
+	case version.Gloas:
+		fieldCount = params.BeaconConfig().BeaconStateGloasFieldCount
+	}
+
+	dst := &BeaconState{
+		version: b.version,
+
+		// Primitive types, safe to copy.
+		genesisTime:                   b.genesisTime,
+		slot:                          b.slot,
+		eth1DepositIndex:              b.eth1DepositIndex,
+		nextWithdrawalIndex:           b.nextWithdrawalIndex,
+		nextWithdrawalValidatorIndex:  b.nextWithdrawalValidatorIndex,
+		depositRequestsStartIndex:     b.depositRequestsStartIndex,
+		depositBalanceToConsume:       b.depositBalanceToConsume,
+		exitBalanceToConsume:          b.exitBalanceToConsume,
+		earliestExitEpoch:             b.earliestExitEpoch,
+		consolidationBalanceToConsume: b.consolidationBalanceToConsume,
+		earliestConsolidationEpoch:    b.earliestConsolidationEpoch,
+
+		// Large arrays, infrequently changed, constant size.
+		blockRootsMultiValue:      b.blockRootsMultiValue,
+		stateRootsMultiValue:      b.stateRootsMultiValue,
+		randaoMixesMultiValue:     b.randaoMixesMultiValue,
+		previousEpochAttestations: b.previousEpochAttestations,
+		currentEpochAttestations:  b.currentEpochAttestations,
+		eth1DataVotes:             b.eth1DataVotes,
+		slashings:                 b.slashings,
+		proposerLookahead:         b.proposerLookahead,
+		ptcWindow:                 b.ptcWindow,
+
+		// Large arrays, increases over time.
+		balancesMultiValue:         b.balancesMultiValue,
+		historicalRoots:            b.historicalRoots,
+		historicalSummaries:        b.historicalSummaries,
+		validatorsMultiValue:       b.validatorsMultiValue,
+		previousEpochParticipation: b.previousEpochParticipation,
+		currentEpochParticipation:  b.currentEpochParticipation,
+		inactivityScoresMultiValue: b.inactivityScoresMultiValue,
+		pendingDeposits:            b.pendingDeposits,
+		pendingPartialWithdrawals:  b.pendingPartialWithdrawals,
+		pendingConsolidations:      b.pendingConsolidations,
+		builders:                   b.builders,
+
+		// Everything else, too small to be concerned about, constant size.
+		genesisValidatorsRoot:               b.genesisValidatorsRoot,
+		justificationBits:                   b.justificationBitsVal(),
+		fork:                                b.forkVal(),
+		latestBlockHeader:                   b.latestBlockHeaderVal(),
+		eth1Data:                            b.eth1DataVal(),
+		previousJustifiedCheckpoint:         b.previousJustifiedCheckpointVal(),
+		currentJustifiedCheckpoint:          b.currentJustifiedCheckpointVal(),
+		finalizedCheckpoint:                 b.finalizedCheckpointVal(),
+		currentSyncCommittee:                b.currentSyncCommitteeVal(),
+		nextSyncCommittee:                   b.nextSyncCommitteeVal(),
+		latestExecutionPayloadHeader:        b.latestExecutionPayloadHeader.Copy(),
+		latestExecutionPayloadHeaderCapella: b.latestExecutionPayloadHeaderCapella.Copy(),
+		latestExecutionPayloadHeaderDeneb:   b.latestExecutionPayloadHeaderDeneb.Copy(),
+		latestExecutionPayloadBid:           b.latestExecutionPayloadBid.Copy(),
+		nextWithdrawalBuilderIndex:          b.nextWithdrawalBuilderIndex,
+		executionPayloadAvailability:        b.executionPayloadAvailabilityVal(),
+		builderPendingPayments:              b.builderPendingPaymentsVal(),
+		builderPendingWithdrawals:           b.builderPendingWithdrawalsVal(),
+		latestBlockHash:                     b.latestBlockHashVal(),
+		payloadExpectedWithdrawals:          b.payloadExpectedWithdrawalsVal(),
+
+		id: types.Enumerator.Inc(),
+
+		dirtyFields:      make(map[types.FieldIndex]bool, fieldCount),
+		dirtyIndices:     make(map[types.FieldIndex][]uint64, fieldCount),
+		rebuildTrie:      make(map[types.FieldIndex]bool, fieldCount),
+		stateFieldLeaves: make(map[types.FieldIndex]*fieldtrie.FieldTrie, len(fieldMap)),
+
+		// Shared and mutated in place, lookups are bounded by each state's validator count.
+		valMapHandler: b.valMapHandler,
+
+		builderIdxMap: maps.Clone(b.builderIdxMap),
+	}
+
+	b.blockRootsMultiValue.Copy(b, dst)
+	b.stateRootsMultiValue.Copy(b, dst)
+	b.randaoMixesMultiValue.Copy(b, dst)
+	b.balancesMultiValue.Copy(b, dst)
+	if b.version > version.Phase0 {
+		b.inactivityScoresMultiValue.Copy(b, dst)
+	}
+	b.validatorsMultiValue.Copy(b, dst)
+
+	switch b.version {
+	case version.Phase0:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, phase0SharedFieldRefCount)
+	case version.Altair:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, altairSharedFieldRefCount)
+	case version.Bellatrix:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, bellatrixSharedFieldRefCount)
+	case version.Capella:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, capellaSharedFieldRefCount)
+	case version.Deneb:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, denebSharedFieldRefCount)
+	case version.Electra:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, electraSharedFieldRefCount)
+	case version.Fulu:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, fuluSharedFieldRefCount)
+	case version.Gloas:
+		dst.sharedFieldReferences = make(map[types.FieldIndex]*stateutil.Reference, gloasSharedFieldRefCount)
+	}
+
+	for field, ref := range b.sharedFieldReferences {
+		ref.AddRef()
+		dst.sharedFieldReferences[field] = ref
+	}
+
+	for i := range b.dirtyFields {
+		dst.dirtyFields[i] = true
+	}
+
+	for i := range b.dirtyIndices {
+		indices := make([]uint64, len(b.dirtyIndices[i]))
+		copy(indices, b.dirtyIndices[i])
+		dst.dirtyIndices[i] = indices
+	}
+
+	for i := range b.rebuildTrie {
+		dst.rebuildTrie[i] = true
+	}
+
+	for fldIdx, fieldTrie := range b.stateFieldLeaves {
+		dst.stateFieldLeaves[fldIdx] = fieldTrie.CopyTrie()
+	}
+
+	if b.merkleLayers != nil {
+		dst.merkleLayers = make([][][]byte, len(b.merkleLayers))
+		for i, layer := range b.merkleLayers {
+			dst.merkleLayers[i] = make([][]byte, len(layer))
+			for j, content := range layer {
+				dst.merkleLayers[i][j] = make([]byte, len(content))
+				copy(dst.merkleLayers[i][j], content)
+			}
+		}
+	}
+	dst.progressiveMerkleTree = b.progressiveMerkleTree.Copy()
+
+	state.Count.Inc()
+	// Finalizer runs when dst is being destroyed in garbage collection.
+	runtime.SetFinalizer(dst, finalizerCleanup)
+	return dst
+}
+
+// HashTreeRoot of the beacon state retrieves the Merkle root of the trie
+// representation of the beacon state based on the Ethereum Simple Serialize specification.
+func (b *BeaconState) HashTreeRoot(ctx context.Context) ([32]byte, error) {
+	ctx, span := trace.StartSpan(ctx, "beaconState.HashTreeRoot")
+	defer span.End()
+
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	if features.ProgressiveSSZEnabled(b.version) {
+		return b.progressiveHashTreeRoot(ctx)
+	}
+	b.progressiveMerkleTree = nil
+
+	if err := b.initializeMerkleLayers(ctx); err != nil {
+		return [32]byte{}, err
+	}
+	if err := b.recomputeDirtyFields(ctx); err != nil {
+		return [32]byte{}, err
+	}
+	return bytesutil.ToBytes32(b.merkleLayers[len(b.merkleLayers)-1][0]), nil
+}
+
+func (b *BeaconState) progressiveHashTreeRoot(ctx context.Context) ([32]byte, error) {
+	if b.version < version.Gloas {
+		return [32]byte{}, fmt.Errorf("progressive SSZ is not supported for version: %s", version.String(b.version))
+	}
+
+	if err := b.initializeProgressiveMerkleTree(ctx); err != nil {
+		return [32]byte{}, err
+	}
+	if err := b.recomputeProgressiveDirtyFields(ctx); err != nil {
+		return [32]byte{}, err
+	}
+
+	var activeFields []bool
+	switch b.version {
+	case version.Gloas:
+		activeFields = make([]bool, params.BeaconConfig().BeaconStateGloasFieldCount)
+		for i := range activeFields {
+			activeFields[i] = true
+		}
+	default:
+		return [32]byte{}, fmt.Errorf("unsupported version: %s", version.String(b.version))
+	}
+
+	root, err := ssz.MixInActiveFields(b.progressiveMerkleTree.Root(), activeFields)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("could not mix in progressive container active fields: %w", err)
+	}
+	b.merkleLayers = nil
+	return root, nil
+}
+
+// initializeProgressiveMerkleTree computes all field roots once and caches the
+// progressive container tree. Subsequent roots update only dirty fields.
+//
+// WARNING: Caller must acquire the mutex before using.
+func (b *BeaconState) initializeProgressiveMerkleTree(ctx context.Context) error {
+	if b.progressiveMerkleTree != nil {
+		return nil
+	}
+
+	var fieldRoots [][]byte
+	switch b.version {
+	case version.Gloas:
+		fieldRoots = make([][]byte, params.BeaconConfig().BeaconStateGloasFieldCount)
+		for _, field := range gloasFields {
+			root, err := b.rootSelector(ctx, field)
+			if err != nil {
+				return fmt.Errorf("could not compute progressive field %s: %w", field.String(), err)
+			}
+			fieldRoots[field.RealPosition()] = bytesutil.SafeCopyBytes(root[:])
+		}
+	default:
+		return fmt.Errorf("unsupported version: %s", version.String(b.version))
+	}
+
+	b.progressiveMerkleTree = stateutil.MerkleizeProgressive(fieldRoots)
+	clear(b.dirtyFields)
+	return nil
+}
+
+// recomputeProgressiveDirtyFields updates dirty field roots in the cached
+// progressive container tree.
+//
+// WARNING: Caller must acquire the mutex before using.
+func (b *BeaconState) recomputeProgressiveDirtyFields(ctx context.Context) error {
+	for field := range b.dirtyFields {
+		root, err := b.rootSelector(ctx, field)
+		if err != nil {
+			return err
+		}
+		if err := b.progressiveMerkleTree.RecomputeRoot(field.RealPosition(), root); err != nil {
+			return fmt.Errorf("could not recompute progressive field %s: %w", field.String(), err)
+		}
+		delete(b.dirtyFields, field)
+	}
+	return nil
+}
+
+// Initializes the Merkle layers for the beacon state if they are empty.
+//
+// WARNING: Caller must acquire the mutex before using.
+func (b *BeaconState) initializeMerkleLayers(ctx context.Context) error {
+	if len(b.merkleLayers) > 0 {
+		return nil
+	}
+	fieldRoots, err := ComputeFieldRootsWithHasher(ctx, b)
+	if err != nil {
+		return err
+	}
+	layers := stateutil.Merkleize(fieldRoots)
+	b.merkleLayers = layers
+	switch b.version {
+	case version.Phase0:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateFieldCount)
+	case version.Altair:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateAltairFieldCount)
+	case version.Bellatrix:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateBellatrixFieldCount)
+	case version.Capella:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateCapellaFieldCount)
+	case version.Deneb:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateDenebFieldCount)
+	case version.Electra:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateElectraFieldCount)
+	case version.Fulu:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateFuluFieldCount)
+	case version.Gloas:
+		b.dirtyFields = make(map[types.FieldIndex]bool, params.BeaconConfig().BeaconStateGloasFieldCount)
+	default:
+		return fmt.Errorf("unknown state version (%s) when computing dirty fields in merklization", version.String(b.version))
+	}
+
+	return nil
+}
+
+// Recomputes the Merkle layers for the dirty fields in the state.
+//
+// WARNING: Caller must acquire the mutex before using.
+func (b *BeaconState) recomputeDirtyFields(ctx context.Context) error {
+	for field := range b.dirtyFields {
+		root, err := b.rootSelector(ctx, field)
+		if err != nil {
+			return err
+		}
+		idx := field.RealPosition()
+		b.merkleLayers[0][idx] = root[:]
+		b.recomputeRoot(idx)
+		delete(b.dirtyFields, field)
+	}
+	return nil
+}
+
+// FieldReferencesCount returns the reference count held by each field. This
+// also includes the field trie held by each field.
+func (b *BeaconState) FieldReferencesCount() map[string]uint64 {
+	refMap := make(map[string]uint64)
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+	for i, f := range b.sharedFieldReferences {
+		refMap[i.String()] = uint64(f.Refs())
+	}
+	for i, f := range b.stateFieldLeaves {
+		numOfRefs := uint64(f.RefCount())
+		refMap[i.String()+"_trie"] = numOfRefs
+	}
+
+	return refMap
+}
+
+// RecordStateMetrics proceeds to record any state related metrics data.
+func (b *BeaconState) RecordStateMetrics() {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+
+	// Validators
+	if b.validatorsMultiValue != nil {
+		stats := b.validatorsMultiValue.MultiValueStatistics()
+		multiValueIndividualElementsCountGauge.WithLabelValues(types.Validators.String()).Set(float64(stats.TotalIndividualElements))
+		multiValueIndividualElementReferencesCountGauge.WithLabelValues(types.Validators.String()).Set(float64(stats.TotalIndividualElemReferences))
+		multiValueAppendedElementsCountGauge.WithLabelValues(types.Validators.String()).Set(float64(stats.TotalAppendedElements))
+		multiValueAppendedElementReferencesCountGauge.WithLabelValues(types.Validators.String()).Set(float64(stats.TotalAppendedElemReferences))
+	}
+
+	// Balances
+	if b.balancesMultiValue != nil {
+		stats := b.balancesMultiValue.MultiValueStatistics()
+		multiValueIndividualElementsCountGauge.WithLabelValues(types.Balances.String()).Set(float64(stats.TotalIndividualElements))
+		multiValueIndividualElementReferencesCountGauge.WithLabelValues(types.Balances.String()).Set(float64(stats.TotalIndividualElemReferences))
+		multiValueAppendedElementsCountGauge.WithLabelValues(types.Balances.String()).Set(float64(stats.TotalAppendedElements))
+		multiValueAppendedElementReferencesCountGauge.WithLabelValues(types.Balances.String()).Set(float64(stats.TotalAppendedElemReferences))
+	}
+
+	// InactivityScores
+	if b.inactivityScoresMultiValue != nil {
+		stats := b.inactivityScoresMultiValue.MultiValueStatistics()
+		multiValueIndividualElementsCountGauge.WithLabelValues(types.InactivityScores.String()).Set(float64(stats.TotalIndividualElements))
+		multiValueIndividualElementReferencesCountGauge.WithLabelValues(types.InactivityScores.String()).Set(float64(stats.TotalIndividualElemReferences))
+		multiValueAppendedElementsCountGauge.WithLabelValues(types.InactivityScores.String()).Set(float64(stats.TotalAppendedElements))
+		multiValueAppendedElementReferencesCountGauge.WithLabelValues(types.InactivityScores.String()).Set(float64(stats.TotalAppendedElemReferences))
+	}
+	// BlockRoots
+	if b.blockRootsMultiValue != nil {
+		stats := b.blockRootsMultiValue.MultiValueStatistics()
+		multiValueIndividualElementsCountGauge.WithLabelValues(types.BlockRoots.String()).Set(float64(stats.TotalIndividualElements))
+		multiValueIndividualElementReferencesCountGauge.WithLabelValues(types.BlockRoots.String()).Set(float64(stats.TotalIndividualElemReferences))
+		multiValueAppendedElementsCountGauge.WithLabelValues(types.BlockRoots.String()).Set(float64(stats.TotalAppendedElements))
+		multiValueAppendedElementReferencesCountGauge.WithLabelValues(types.BlockRoots.String()).Set(float64(stats.TotalAppendedElemReferences))
+	}
+
+	// StateRoots
+	if b.stateRootsMultiValue != nil {
+		stats := b.stateRootsMultiValue.MultiValueStatistics()
+		multiValueIndividualElementsCountGauge.WithLabelValues(types.StateRoots.String()).Set(float64(stats.TotalIndividualElements))
+		multiValueIndividualElementReferencesCountGauge.WithLabelValues(types.StateRoots.String()).Set(float64(stats.TotalIndividualElemReferences))
+		multiValueAppendedElementsCountGauge.WithLabelValues(types.StateRoots.String()).Set(float64(stats.TotalAppendedElements))
+		multiValueAppendedElementReferencesCountGauge.WithLabelValues(types.StateRoots.String()).Set(float64(stats.TotalAppendedElemReferences))
+	}
+	// RandaoMixes
+	if b.randaoMixesMultiValue != nil {
+		stats := b.randaoMixesMultiValue.MultiValueStatistics()
+		multiValueIndividualElementsCountGauge.WithLabelValues(types.RandaoMixes.String()).Set(float64(stats.TotalIndividualElements))
+		multiValueIndividualElementReferencesCountGauge.WithLabelValues(types.RandaoMixes.String()).Set(float64(stats.TotalIndividualElemReferences))
+		multiValueAppendedElementsCountGauge.WithLabelValues(types.RandaoMixes.String()).Set(float64(stats.TotalAppendedElements))
+		multiValueAppendedElementReferencesCountGauge.WithLabelValues(types.RandaoMixes.String()).Set(float64(stats.TotalAppendedElemReferences))
+	}
+
+	recordGloasStateMetrics(b)
+}
+
+func recordGloasStateMetrics(b *BeaconState) {
+	if b.version < version.Gloas {
+		gloasExecutionPayloadAvailabilityRatio.Set(0)
+		gloasBuilderPendingWithdrawalsCount.Set(0)
+		gloasBuilderPendingWithdrawalsGwei.Set(0)
+		gloasPayloadExpectedWithdrawalsCount.Set(0)
+		gloasActiveBuildersCount.Set(0)
+		gloasActiveBuildersBalanceGwei.Set(0)
+		return
+	}
+
+	slotsPerHistoricalRoot := uint64(params.BeaconConfig().SlotsPerHistoricalRoot)
+	if slotsPerHistoricalRoot == 0 {
+		gloasExecutionPayloadAvailabilityRatio.Set(0)
+	} else {
+		availableCount := 0
+		for i, availabilityByte := range b.executionPayloadAvailability {
+			if i == len(b.executionPayloadAvailability)-1 && slotsPerHistoricalRoot%8 != 0 {
+				mask := byte((1 << (slotsPerHistoricalRoot % 8)) - 1)
+				availableCount += bits.OnesCount8(availabilityByte & mask)
+				continue
+			}
+			availableCount += bits.OnesCount8(availabilityByte)
+		}
+		gloasExecutionPayloadAvailabilityRatio.Set(float64(availableCount) / float64(slotsPerHistoricalRoot))
+	}
+
+	var pendingWithdrawalsGwei uint64
+	for _, withdrawal := range b.builderPendingWithdrawals {
+		if withdrawal == nil {
+			continue
+		}
+		pendingWithdrawalsGwei += uint64(withdrawal.Amount)
+	}
+	gloasBuilderPendingWithdrawalsCount.Set(float64(len(b.builderPendingWithdrawals)))
+	gloasBuilderPendingWithdrawalsGwei.Set(float64(pendingWithdrawalsGwei))
+	gloasPayloadExpectedWithdrawalsCount.Set(float64(len(b.payloadExpectedWithdrawals)))
+
+	var activeBuildersCount uint64
+	var activeBuildersBalanceGwei uint64
+	finalizedEpoch := primitives.Epoch(0)
+	if b.finalizedCheckpoint != nil {
+		finalizedEpoch = b.finalizedCheckpoint.Epoch
+	}
+	for _, builder := range b.builders {
+		if builder == nil {
+			continue
+		}
+		if builder.DepositEpoch >= finalizedEpoch || builder.WithdrawableEpoch != params.BeaconConfig().FarFutureEpoch {
+			continue
+		}
+		activeBuildersCount++
+		activeBuildersBalanceGwei += uint64(builder.Balance)
+	}
+	gloasActiveBuildersCount.Set(float64(activeBuildersCount))
+	gloasActiveBuildersBalanceGwei.Set(float64(activeBuildersBalanceGwei))
+}
+
+// IsNil checks if the state and the underlying proto
+// object are nil.
+func (b *BeaconState) IsNil() bool {
+	return b == nil
+}
+
+func (b *BeaconState) rootSelector(ctx context.Context, field types.FieldIndex) ([32]byte, error) {
+	_, span := trace.StartSpan(ctx, "beaconState.rootSelector")
+	defer span.End()
+	span.SetAttributes(trace.StringAttribute("field", field.String()))
+	progressiveSSZ := features.ProgressiveSSZEnabled(b.version)
+
+	switch field {
+	case types.GenesisTime:
+		return ssz.Uint64Root(b.genesisTime), nil
+	case types.GenesisValidatorsRoot:
+		return b.genesisValidatorsRoot, nil
+	case types.Slot:
+		return ssz.Uint64Root(uint64(b.slot)), nil
+	case types.Eth1DepositIndex:
+		return ssz.Uint64Root(b.eth1DepositIndex), nil
+	case types.Fork:
+		return wrappers.ForkRoot(b.fork)
+	case types.LatestBlockHeader:
+		return stateutil.BlockHeaderRoot(b.latestBlockHeader)
+	case types.BlockRoots:
+		return b.blockRootsRootSelector(field)
+	case types.StateRoots:
+		return b.stateRootsRootSelector(field)
+	case types.HistoricalRoots:
+		hRoots := make([][]byte, len(b.historicalRoots))
+		for i := range hRoots {
+			hRoots[i] = b.historicalRoots[i][:]
+		}
+		return ssz.ByteArrayRootWithLimit(hRoots, fieldparams.HistoricalRootsLength)
+	case types.Eth1Data:
+		return stateutil.Eth1Root(b.eth1Data)
+	case types.Eth1DataVotes:
+		if b.rebuildTrie[field] {
+			err := b.resetFieldTrie(
+				field,
+				b.eth1DataVotes,
+				params.BeaconConfig().Eth1DataVotesLength(),
+			)
+			if err != nil {
+				return [32]byte{}, err
+			}
+			delete(b.rebuildTrie, field)
+			return b.stateFieldLeaves[field].TrieRoot()
+		}
+		return b.recomputeFieldTrie(field, b.eth1DataVotes)
+	case types.Validators:
+		return b.validatorsRootSelector(field, progressiveSSZ)
+	case types.Balances:
+		return b.balancesRootSelector(field, progressiveSSZ)
+	case types.RandaoMixes:
+		return b.randaoMixesRootSelector(field)
+	case types.Slashings:
+		return ssz.SlashingsRoot(b.slashings)
+	case types.PreviousEpochAttestations:
+		if b.rebuildTrie[field] {
+			err := b.resetFieldTrie(
+				field,
+				b.previousEpochAttestations,
+				params.BeaconConfig().PreviousEpochAttestationsLength(),
+			)
+			if err != nil {
+				return [32]byte{}, err
+			}
+			delete(b.rebuildTrie, field)
+			return b.stateFieldLeaves[field].TrieRoot()
+		}
+		return b.recomputeFieldTrie(field, b.previousEpochAttestations)
+	case types.CurrentEpochAttestations:
+		if b.rebuildTrie[field] {
+			err := b.resetFieldTrie(
+				field,
+				b.currentEpochAttestations,
+				params.BeaconConfig().CurrentEpochAttestationsLength(),
+			)
+			if err != nil {
+				return [32]byte{}, err
+			}
+			delete(b.rebuildTrie, field)
+			return b.stateFieldLeaves[field].TrieRoot()
+		}
+		return b.recomputeFieldTrie(field, b.currentEpochAttestations)
+	case types.PreviousEpochParticipationBits:
+		return stateutil.ParticipationBitsRoot(b.version, b.previousEpochParticipation)
+	case types.CurrentEpochParticipationBits:
+		return stateutil.ParticipationBitsRoot(b.version, b.currentEpochParticipation)
+	case types.JustificationBits:
+		return bytesutil.ToBytes32(b.justificationBits), nil
+	case types.PreviousJustifiedCheckpoint:
+		return wrappers.CheckpointRoot(b.previousJustifiedCheckpoint)
+	case types.CurrentJustifiedCheckpoint:
+		return wrappers.CheckpointRoot(b.currentJustifiedCheckpoint)
+	case types.FinalizedCheckpoint:
+		return wrappers.CheckpointRoot(b.finalizedCheckpoint)
+	case types.InactivityScores:
+		return stateutil.Uint64ListRoot(b.version, b.inactivityScoresVal())
+	case types.CurrentSyncCommittee:
+		return stateutil.SyncCommitteeRoot(b.currentSyncCommittee)
+	case types.NextSyncCommittee:
+		return stateutil.SyncCommitteeRoot(b.nextSyncCommittee)
+	case types.LatestExecutionPayloadHeader:
+		return b.latestExecutionPayloadHeader.HashTreeRoot()
+	case types.LatestExecutionPayloadHeaderCapella:
+		return b.latestExecutionPayloadHeaderCapella.HashTreeRoot()
+	case types.LatestExecutionPayloadHeaderDeneb:
+		return b.latestExecutionPayloadHeaderDeneb.HashTreeRoot()
+	case types.NextWithdrawalIndex:
+		return ssz.Uint64Root(b.nextWithdrawalIndex), nil
+	case types.NextWithdrawalValidatorIndex:
+		return ssz.Uint64Root(uint64(b.nextWithdrawalValidatorIndex)), nil
+	case types.HistoricalSummaries:
+		return stateutil.HistoricalSummariesRoot(b.historicalSummaries)
+	case types.DepositRequestsStartIndex:
+		return ssz.Uint64Root(b.depositRequestsStartIndex), nil
+	case types.DepositBalanceToConsume:
+		return ssz.Uint64Root(uint64(b.depositBalanceToConsume)), nil
+	case types.ExitBalanceToConsume:
+		return ssz.Uint64Root(uint64(b.exitBalanceToConsume)), nil
+	case types.EarliestExitEpoch:
+		return ssz.Uint64Root(uint64(b.earliestExitEpoch)), nil
+	case types.ConsolidationBalanceToConsume:
+		return ssz.Uint64Root(uint64(b.consolidationBalanceToConsume)), nil
+	case types.EarliestConsolidationEpoch:
+		return ssz.Uint64Root(uint64(b.earliestConsolidationEpoch)), nil
+	case types.PendingDeposits:
+		return stateutil.PendingDepositsRoot(b.version, b.pendingDeposits)
+	case types.PendingPartialWithdrawals:
+		return stateutil.PendingPartialWithdrawalsRoot(b.version, b.pendingPartialWithdrawals)
+	case types.PendingConsolidations:
+		return stateutil.PendingConsolidationsRoot(b.version, b.pendingConsolidations)
+	case types.ProposerLookahead:
+		return stateutil.ProposerLookaheadRoot(b.proposerLookahead)
+	case types.LatestExecutionPayloadBid:
+		return b.latestExecutionPayloadBid.HashTreeRoot()
+	case types.Builders:
+		return stateutil.BuildersRoot(b.version, b.builders)
+	case types.NextWithdrawalBuilderIndex:
+		return ssz.Uint64Root(uint64(b.nextWithdrawalBuilderIndex)), nil
+	case types.ExecutionPayloadAvailability:
+		return stateutil.ExecutionPayloadAvailabilityRoot(b.executionPayloadAvailability)
+
+	case types.BuilderPendingPayments:
+		return stateutil.BuilderPendingPaymentsRoot(b.builderPendingPayments)
+	case types.BuilderPendingWithdrawals:
+		return stateutil.BuilderPendingWithdrawalsRoot(b.version, b.builderPendingWithdrawals)
+	case types.LatestBlockHash:
+		return bytesutil.ToBytes32(b.latestBlockHash), nil
+	case types.PayloadExpectedWithdrawals:
+		return stateutil.PayloadExpectedWithdrawalsRoot(b.version, b.payloadExpectedWithdrawals)
+	case types.PTCWindow:
+		return stateutil.PTCWindowRoot(b.ptcWindow)
+	}
+	return [32]byte{}, errors.New("invalid field index provided")
+}
+
+func (b *BeaconState) recomputeFieldTrie(index types.FieldIndex, elements any) ([32]byte, error) {
+	trie, root, err := b.stateFieldLeaves[index].RecomputeTrie(b.dirtyIndices[index], elements)
+	b.stateFieldLeaves[index] = trie
+	if err != nil {
+		return [32]byte{}, err
+	}
+	b.dirtyIndices[index] = []uint64{}
+	return root, nil
+}
+
+func (b *BeaconState) resetFieldTrie(index types.FieldIndex, elements any, length uint64) error {
+	return b.resetFieldTrieWithMode(index, elements, length, fieldtrie.MerkleModeLegacy)
+}
+
+func (b *BeaconState) resetFieldTrieWithMode(
+	index types.FieldIndex,
+	elements any,
+	length uint64,
+	merkleMode fieldtrie.MerkleMode,
+) error {
+	fTrie, err := fieldtrie.NewFieldTrieWithMode(
+		index,
+		fieldMap[index],
+		merkleMode,
+		elements,
+		length,
+		promotionThresholdByField[index],
+	)
+	if err != nil {
+		return err
+	}
+	b.stateFieldLeaves[index] = fTrie
+	b.dirtyIndices[index] = []uint64{}
+	return nil
+}
+
+func finalizerCleanup(b *BeaconState) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	for _, v := range b.sharedFieldReferences {
+		v.MinusRef()
+	}
+	for i := range b.dirtyFields {
+		delete(b.dirtyFields, i)
+	}
+	for i := range b.rebuildTrie {
+		delete(b.rebuildTrie, i)
+	}
+	for i := range b.dirtyIndices {
+		delete(b.dirtyIndices, i)
+	}
+	for i := range b.sharedFieldReferences {
+		delete(b.sharedFieldReferences, i)
+	}
+	for i := range b.stateFieldLeaves {
+		delete(b.stateFieldLeaves, i)
+	}
+
+	if b.blockRootsMultiValue != nil {
+		b.blockRootsMultiValue.Detach(b)
+	}
+	if b.stateRootsMultiValue != nil {
+		b.stateRootsMultiValue.Detach(b)
+	}
+	if b.randaoMixesMultiValue != nil {
+		b.randaoMixesMultiValue.Detach(b)
+	}
+	if b.balancesMultiValue != nil {
+		b.balancesMultiValue.Detach(b)
+	}
+	if b.inactivityScoresMultiValue != nil {
+		b.inactivityScoresMultiValue.Detach(b)
+	}
+	if b.validatorsMultiValue != nil {
+		b.validatorsMultiValue.Detach(b)
+	}
+
+	state.Count.Sub(1)
+}
+
+func (b *BeaconState) blockRootsRootSelector(field types.FieldIndex) ([32]byte, error) {
+	if b.rebuildTrie[field] {
+		err := b.resetFieldTrie(field, mvslice.MultiValueSliceComposite[[32]byte]{
+			Identifiable:    b,
+			MultiValueSlice: b.blockRootsMultiValue,
+		}, fieldparams.BlockRootsLength)
+		if err != nil {
+			return [32]byte{}, err
+		}
+
+		delete(b.rebuildTrie, field)
+		return b.stateFieldLeaves[field].TrieRoot()
+	}
+	return b.recomputeFieldTrie(field, mvslice.MultiValueSliceComposite[[32]byte]{
+		Identifiable:    b,
+		MultiValueSlice: b.blockRootsMultiValue,
+	})
+}
+
+func (b *BeaconState) stateRootsRootSelector(field types.FieldIndex) ([32]byte, error) {
+	if b.rebuildTrie[field] {
+		err := b.resetFieldTrie(field, mvslice.MultiValueSliceComposite[[32]byte]{
+			Identifiable:    b,
+			MultiValueSlice: b.stateRootsMultiValue,
+		}, fieldparams.StateRootsLength)
+		if err != nil {
+			return [32]byte{}, err
+		}
+
+		delete(b.rebuildTrie, field)
+		return b.stateFieldLeaves[field].TrieRoot()
+	}
+	return b.recomputeFieldTrie(field, mvslice.MultiValueSliceComposite[[32]byte]{
+		Identifiable:    b,
+		MultiValueSlice: b.stateRootsMultiValue,
+	})
+}
+
+func (b *BeaconState) validatorsRootSelector(field types.FieldIndex, progressive bool) ([32]byte, error) {
+	merkleMode := fieldtrie.MerkleModeLegacy
+	if progressive {
+		merkleMode = fieldtrie.MerkleModeProgressive
+	}
+	if b.rebuildTrie[field] || b.stateFieldLeaves[field].MerkleMode() != merkleMode {
+		err := b.resetFieldTrieWithMode(field, mvslice.MultiValueSliceComposite[stateutil.CompactValidator]{
+			Identifiable:    b,
+			MultiValueSlice: b.validatorsMultiValue,
+		}, fieldparams.ValidatorRegistryLimit, merkleMode)
+		if err != nil {
+			return [32]byte{}, err
+		}
+
+		delete(b.rebuildTrie, field)
+		return b.stateFieldLeaves[field].TrieRoot()
+	}
+	return b.recomputeFieldTrie(field, mvslice.MultiValueSliceComposite[stateutil.CompactValidator]{
+		Identifiable:    b,
+		MultiValueSlice: b.validatorsMultiValue,
+	})
+}
+
+func (b *BeaconState) balancesRootSelector(field types.FieldIndex, progressive bool) ([32]byte, error) {
+	merkleMode := fieldtrie.MerkleModeLegacy
+	if progressive {
+		merkleMode = fieldtrie.MerkleModeProgressive
+	}
+	if b.rebuildTrie[field] || b.stateFieldLeaves[field].MerkleMode() != merkleMode {
+		err := b.resetFieldTrieWithMode(field, mvslice.MultiValueSliceComposite[uint64]{
+			Identifiable:    b,
+			MultiValueSlice: b.balancesMultiValue,
+		}, stateutil.ValidatorLimitForBalancesChunks(), merkleMode)
+		if err != nil {
+			return [32]byte{}, err
+		}
+		delete(b.rebuildTrie, field)
+		return b.stateFieldLeaves[field].TrieRoot()
+	}
+	return b.recomputeFieldTrie(field, mvslice.MultiValueSliceComposite[uint64]{
+		Identifiable:    b,
+		MultiValueSlice: b.balancesMultiValue,
+	})
+}
+
+func (b *BeaconState) randaoMixesRootSelector(field types.FieldIndex) ([32]byte, error) {
+	if b.rebuildTrie[field] {
+		err := b.resetFieldTrie(field, mvslice.MultiValueSliceComposite[[32]byte]{
+			Identifiable:    b,
+			MultiValueSlice: b.randaoMixesMultiValue,
+		}, fieldparams.RandaoMixesLength)
+		if err != nil {
+			return [32]byte{}, err
+		}
+
+		delete(b.rebuildTrie, field)
+		return b.stateFieldLeaves[field].TrieRoot()
+	}
+	return b.recomputeFieldTrie(field, mvslice.MultiValueSliceComposite[[32]byte]{
+		Identifiable:    b,
+		MultiValueSlice: b.randaoMixesMultiValue,
+	})
+}

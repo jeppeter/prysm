@@ -1,0 +1,284 @@
+package client
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/signing"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/crypto/bls"
+	"github.com/OffchainLabs/prysm/v7/monitoring/tracing/trace"
+	"github.com/OffchainLabs/prysm/v7/network/httputil"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	validatorpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1/validator-client"
+	"github.com/OffchainLabs/prysm/v7/runtime/version"
+	"github.com/OffchainLabs/prysm/v7/time/slots"
+	"github.com/pkg/errors"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// SubmitAggregateAndProof submits the validator's signed slot signature to the beacon node
+// via gRPC. Beacon node will verify the slot signature and determine if the validator is also
+// an aggregator. If yes, then beacon node will broadcast aggregated signature and
+// proof on the validator's behalf.
+func (v *validator) SubmitAggregateAndProof(ctx context.Context, slot primitives.Slot, pubKey [fieldparams.BLSPubkeyLength]byte) {
+	ctx, span := trace.StartSpan(ctx, "validator.SubmitAggregateAndProof")
+	defer span.End()
+
+	span.SetAttributes(trace.StringAttribute("validator", fmt.Sprintf("%#x", pubKey)))
+	fmtKey := fmt.Sprintf("%#x", pubKey[:])
+
+	duty, err := v.duty(pubKey)
+	if err != nil {
+		log.WithError(err).Error("Could not fetch validator assignment")
+		if v.emitAccountMetrics {
+			ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+		}
+		return
+	}
+
+	if !v.aggSelector.ClaimAggregateSlot(slot, duty.CommitteeIndex) {
+		return
+	}
+
+	// As specified in spec, an aggregator should wait until two thirds of the way through slot
+	// to broadcast the best aggregate to the global aggregate channel.
+	// https://github.com/ethereum/consensus-specs/blob/v0.9.3/specs/validator/0_beacon-chain-validator.md#broadcast-aggregate
+	v.waitUntilAggregateDue(ctx, slot)
+
+	slotSig, err := v.aggSelector.AttestationSelectionProof(ctx, slot, pubKey)
+	if err != nil {
+		log.WithError(err).Error("Could not get selection proof")
+		if v.emitAccountMetrics {
+			ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+		}
+		return
+	}
+
+	epoch := slots.ToEpoch(slot)
+	postElectra := epoch >= params.BeaconConfig().ElectraForkEpoch
+	postGloas := epoch >= params.BeaconConfig().GloasForkEpoch
+
+	aggSelectionRequest := &ethpb.AggregateSelectionRequest{
+		Slot:           slot,
+		CommitteeIndex: duty.CommitteeIndex,
+		PublicKey:      pubKey[:],
+		SlotSignature:  slotSig,
+	}
+	// TODO: look at renaming SubmitAggregateSelectionProof functions as they are GET beacon API
+	var agg ethpb.AggregateAttAndProof
+	if postElectra {
+		res, err := v.validatorClient.SubmitAggregateSelectionProofElectra(ctx, aggSelectionRequest, duty.ValidatorIndex, duty.CommitteeLength)
+		if err != nil {
+			v.handleSubmitAggSelectionProofError(err, slot, fmtKey)
+			return
+		}
+		if postGloas {
+			agg = ethpb.AggregateAttestationAndProofElectraToGloas(res.AggregateAndProof)
+		} else {
+			agg = res.AggregateAndProof
+		}
+	} else {
+		res, err := v.validatorClient.SubmitAggregateSelectionProof(ctx, aggSelectionRequest, duty.ValidatorIndex, duty.CommitteeLength)
+		if err != nil {
+			v.handleSubmitAggSelectionProofError(err, slot, fmtKey)
+			return
+		}
+		agg = res.AggregateAndProof
+	}
+
+	sig, err := v.aggregateAndProofSig(ctx, pubKey, agg, slot)
+	if err != nil {
+		log.WithError(err).Error("Could not sign aggregate and proof")
+		return
+	}
+
+	if postElectra {
+		var msg *ethpb.AggregateAttestationAndProofElectra
+		if postGloas {
+			gloasMsg, ok := agg.(*ethpb.AggregateAttestationAndProofGloas)
+			if !ok {
+				log.Errorf("Message is not %T", &ethpb.AggregateAttestationAndProofGloas{})
+				if v.emitAccountMetrics {
+					ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+				}
+				return
+			}
+			msg = ethpb.AggregateAttestationAndProofGloasToElectra(gloasMsg)
+		} else {
+			electraMsg, ok := agg.(*ethpb.AggregateAttestationAndProofElectra)
+			if !ok {
+				log.Errorf("Message is not %T", &ethpb.AggregateAttestationAndProofElectra{})
+				if v.emitAccountMetrics {
+					ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+				}
+				return
+			}
+			msg = electraMsg
+		}
+		_, err = v.validatorClient.SubmitSignedAggregateSelectionProofElectra(ctx, &ethpb.SignedAggregateSubmitElectraRequest{
+			SignedAggregateAndProof: &ethpb.SignedAggregateAttestationAndProofElectra{
+				Message:   msg,
+				Signature: sig,
+			},
+		})
+		if err != nil {
+			log.WithError(err).Error("Could not submit signed aggregate and proof to beacon node")
+			if v.emitAccountMetrics {
+				ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+			}
+			return
+		}
+	} else {
+		msg, ok := agg.(*ethpb.AggregateAttestationAndProof)
+		if !ok {
+			log.Errorf("Message is not %T", &ethpb.AggregateAttestationAndProof{})
+			if v.emitAccountMetrics {
+				ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+			}
+			return
+		}
+		_, err = v.validatorClient.SubmitSignedAggregateSelectionProof(ctx, &ethpb.SignedAggregateSubmitRequest{
+			SignedAggregateAndProof: &ethpb.SignedAggregateAttestationAndProof{
+				Message:   msg,
+				Signature: sig,
+			},
+		})
+		if err != nil {
+			log.WithError(err).Error("Could not submit signed aggregate and proof to beacon node")
+			if v.emitAccountMetrics {
+				ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+			}
+			return
+		}
+	}
+
+	if err := v.saveSubmittedAtt(agg.AggregateVal(), pubKey[:], true); err != nil {
+		log.WithError(err).Error("Could not add aggregator indices to logs")
+		if v.emitAccountMetrics {
+			ValidatorAggFailVec.WithLabelValues(fmtKey).Inc()
+		}
+		return
+	}
+	if v.emitAccountMetrics {
+		ValidatorAggSuccessVec.WithLabelValues(fmtKey).Inc()
+	}
+}
+
+// Signs input slot with domain selection proof. This is used to create the signature for aggregator selection.
+func (v *validator) signSlotWithSelectionProof(ctx context.Context, pubKey [fieldparams.BLSPubkeyLength]byte, slot primitives.Slot) (signature []byte, err error) {
+	ctx, span := trace.StartSpan(ctx, "validator.signSlotWithSelectionProof")
+	defer span.End()
+
+	domain, err := v.domainData(ctx, slots.ToEpoch(slot), params.BeaconConfig().DomainSelectionProof[:])
+	if err != nil {
+		return nil, err
+	}
+
+	var sig bls.Signature
+	sszUint := primitives.SSZUint64(slot)
+	root, err := signing.ComputeSigningRoot(&sszUint, domain.SignatureDomain)
+	if err != nil {
+		return nil, err
+	}
+	sig, err = v.km.Sign(ctx, &validatorpb.SignRequest{
+		PublicKey:       pubKey[:],
+		SigningRoot:     root[:],
+		SignatureDomain: domain.SignatureDomain,
+		Object:          &validatorpb.SignRequest_Slot{Slot: slot},
+		SigningSlot:     slot,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return sig.Marshal(), nil
+}
+
+// waitUntilAggregateDue waits until the configured aggregation due time within the current slot
+// such that any attestations from this slot have time to reach the beacon node before creating
+// the aggregated attestation.
+//
+// Note: Historically this was ~2/3 of the slot, but may differ across forks (e.g. Gloas).
+func (v *validator) waitUntilAggregateDue(ctx context.Context, slot primitives.Slot) {
+	cfg := params.BeaconConfig()
+	component := cfg.AggregateDueBPS
+	if slots.ToEpoch(slot) >= cfg.GloasForkEpoch {
+		component = cfg.AggregateDueBPSGloas
+	}
+	v.waitUntilSlotComponent(ctx, slot, component)
+}
+
+// This returns the signature of validator signing over aggregate and
+// proof object.
+func (v *validator) aggregateAndProofSig(ctx context.Context, pubKey [fieldparams.BLSPubkeyLength]byte, agg ethpb.AggregateAttAndProof, slot primitives.Slot) ([]byte, error) {
+	ctx, span := trace.StartSpan(ctx, "validator.aggregateAndProofSig")
+	defer span.End()
+
+	d, err := v.domainData(ctx, slots.ToEpoch(agg.AggregateVal().GetData().Slot), params.BeaconConfig().DomainAggregateAndProof[:])
+	if err != nil {
+		return nil, err
+	}
+	root, err := signing.ComputeSigningRoot(agg, d.SignatureDomain)
+	if err != nil {
+		return nil, err
+	}
+
+	signRequest := &validatorpb.SignRequest{
+		PublicKey:       pubKey[:],
+		SigningRoot:     root[:],
+		SignatureDomain: d.SignatureDomain,
+		SigningSlot:     slot,
+	}
+	switch {
+	case agg.Version() >= version.Gloas:
+		aggregate, ok := agg.(*ethpb.AggregateAttestationAndProofGloas)
+		if !ok {
+			return nil, fmt.Errorf("wrong aggregate type (expected %T, got %T)", &ethpb.AggregateAttestationAndProofGloas{}, agg)
+		}
+		signRequest.Object = &validatorpb.SignRequest_AggregateAttestationAndProofElectra{
+			AggregateAttestationAndProofElectra: ethpb.AggregateAttestationAndProofGloasToElectra(aggregate),
+		}
+	case agg.Version() >= version.Electra:
+		aggregate, ok := agg.(*ethpb.AggregateAttestationAndProofElectra)
+		if !ok {
+			return nil, fmt.Errorf("wrong aggregate type (expected %T, got %T)", &ethpb.AggregateAttestationAndProofElectra{}, agg)
+		}
+		signRequest.Object = &validatorpb.SignRequest_AggregateAttestationAndProofElectra{AggregateAttestationAndProofElectra: aggregate}
+	default:
+		aggregate, ok := agg.(*ethpb.AggregateAttestationAndProof)
+		if !ok {
+			return nil, fmt.Errorf("wrong aggregate type (expected %T, got %T)", &ethpb.AggregateAttestationAndProof{}, agg)
+		}
+		signRequest.Object = &validatorpb.SignRequest_AggregateAttestationAndProof{AggregateAttestationAndProof: aggregate}
+	}
+
+	sig, err := v.km.Sign(ctx, signRequest)
+	if err != nil {
+		return nil, err
+	}
+
+	return sig.Marshal(), nil
+}
+
+func (v *validator) handleSubmitAggSelectionProofError(err error, slot primitives.Slot, hexPubkey string) {
+	// handle grpc not found
+	s, ok := status.FromError(err)
+	grpcNotFound := ok && s.Code() == codes.NotFound
+	// handle http not found
+	jsonErr := &httputil.DefaultJsonError{}
+	httpNotFound := errors.As(err, &jsonErr) && jsonErr.Code == http.StatusNotFound
+
+	if grpcNotFound || httpNotFound {
+		log.WithField("slot", slot).WithError(err).Warn("No attestations to aggregate")
+	} else {
+		log.WithField("slot", slot).WithError(err).Error("Could not submit aggregate selection proof to beacon node")
+		if v.emitAccountMetrics {
+			ValidatorAggFailVec.WithLabelValues(hexPubkey).Inc()
+		}
+	}
+}

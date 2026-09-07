@@ -1,0 +1,81 @@
+// Package tracing sets up jaeger as an opentracing tool
+// for services in Prysm.
+package tracing
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	prysmTrace "github.com/OffchainLabs/prysm/v7/monitoring/tracing/trace"
+	"github.com/OffchainLabs/prysm/v7/runtime/version"
+	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	"go.opentelemetry.io/otel/trace/noop"
+)
+
+var log = logrus.WithField("prefix", "tracing")
+
+// Setup creates and initializes a new Jaegar tracing configuration with opentelemetry.
+func Setup(ctx context.Context, serviceName, processName, endpoint string, sampleFraction float64, enable bool) error {
+	if !enable {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		return nil
+	}
+	prysmTrace.TracingEnabled = true
+
+	if serviceName == "" {
+		return errors.New("tracing service name cannot be empty")
+	}
+
+	log.WithField("endpoint", endpoint).Info("Starting otel exporter endpoint")
+	exporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(endpoint))
+	if err != nil {
+		return err
+	}
+
+	res, err := buildResource(ctx, serviceName, processName)
+	if err != nil {
+		return err
+	}
+
+	tp := trace.NewTracerProvider(
+		trace.WithSampler(trace.TraceIDRatioBased(sampleFraction)),
+		trace.WithBatcher(
+			exporter,
+			trace.WithMaxExportBatchSize(trace.DefaultMaxExportBatchSize),
+			trace.WithBatchTimeout(trace.DefaultScheduleDelay*time.Millisecond),
+		),
+		trace.WithResource(res),
+	)
+
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	return nil
+}
+
+func buildResource(ctx context.Context, serviceName, processName string) (*resource.Resource, error) {
+	attrs := []attribute.KeyValue{
+		semconv.ServiceNameKey.String(serviceName),
+		attribute.String("build", version.BuildData()),
+	}
+	if processName != "" {
+		attrs = append(attrs,
+			semconv.ServiceInstanceIDKey.String(processName),
+			attribute.String("process_name", processName),
+		)
+	}
+
+	return resource.New(ctx,
+		resource.WithSchemaURL(semconv.SchemaURL),
+		resource.WithAttributes(attrs...),
+		resource.WithFromEnv(),
+	)
+}

@@ -1,0 +1,601 @@
+package transition
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/altair"
+	b "github.com/OffchainLabs/prysm/v7/beacon-chain/core/blocks"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/gloas"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/helpers"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/validators"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	"github.com/OffchainLabs/prysm/v7/config/features"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/interfaces"
+	"github.com/OffchainLabs/prysm/v7/crypto/bls"
+	"github.com/OffchainLabs/prysm/v7/monitoring/tracing"
+	"github.com/OffchainLabs/prysm/v7/monitoring/tracing/trace"
+	"github.com/OffchainLabs/prysm/v7/runtime/version"
+	"github.com/pkg/errors"
+)
+
+// ExecuteStateTransitionNoVerifyAnySig defines the procedure for a state transition function.
+// This does not validate any BLS signatures of attestations, block proposer signature, randao signature,
+// it is used for performing a state transition as quickly as possible. This function also returns a signature
+// set of all signatures not verified, so that they can be stored and verified later.
+//
+// WARNING: This method does not validate any signatures (i.e. calling `state_transition()` with `validate_result=False`).
+// This method also modifies the passed in state.
+//
+// Spec pseudocode definition:
+//
+//	def state_transition(state: BeaconState, signed_block: ReadOnlySignedBeaconBlock, validate_result: bool=True) -> None:
+//	  block = signed_block.message
+//	  # Process slots (including those with no blocks) since block
+//	  process_slots(state, block.slot)
+//	  # Verify signature
+//	  if validate_result:
+//	      assert verify_block_signature(state, signed_block)
+//	  # Process block
+//	  process_block(state, block)
+//	  # Verify state root
+//	  if validate_result:
+//	      assert block.state_root == hash_tree_root(state)
+func ExecuteStateTransitionNoVerifyAnySig(
+	ctx context.Context,
+	st state.BeaconState,
+	signed interfaces.ReadOnlySignedBeaconBlock,
+) (*bls.SignatureBatch, state.BeaconState, error) {
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	if signed == nil || signed.IsNil() || signed.Block().IsNil() {
+		return nil, nil, errors.New("nil block")
+	}
+
+	ctx, span := trace.StartSpan(ctx, "core.state.ExecuteStateTransitionNoVerifyAnySig")
+	defer span.End()
+	var err error
+
+	parentRoot := signed.Block().ParentRoot()
+	st, err = ProcessSlotsUsingNextSlotCache(ctx, st, parentRoot[:], signed.Block().Slot())
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "could not process slots")
+	}
+
+	// Execute per block transition.
+	sigSlice, st, err := ProcessBlockNoVerifyAnySig(ctx, st, signed)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "could not process block")
+	}
+	set := sigSlice.Batch()
+
+	// State root validation.
+	postStateRoot, err := st.HashTreeRoot(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stateRoot := signed.Block().StateRoot()
+	if !bytes.Equal(postStateRoot[:], stateRoot[:]) {
+		return nil, nil, fmt.Errorf("could not validate state root, wanted: %#x, received: %#x",
+			postStateRoot[:], signed.Block().StateRoot())
+	}
+
+	return set, st, nil
+}
+
+// CalculateStateRoot defines the procedure for a state transition function.
+// This does not validate any BLS signatures in a block, it is used for calculating the
+// state root of the state for the block proposer to use.
+// This does not modify state.
+//
+// WARNING: This method does not validate any BLS signatures (i.e. calling `state_transition()` with `validate_result=False`).
+// This is used for proposer to compute state root before proposing a new block, and this does not modify state.
+//
+// Spec pseudocode definition:
+//
+//	def state_transition(state: BeaconState, signed_block: ReadOnlySignedBeaconBlock, validate_result: bool=True) -> None:
+//	  block = signed_block.message
+//	  # Process slots (including those with no blocks) since block
+//	  process_slots(state, block.slot)
+//	  # Verify signature
+//	  if validate_result:
+//	      assert verify_block_signature(state, signed_block)
+//	  # Process block
+//	  process_block(state, block)
+//	  # Verify state root
+//	  if validate_result:
+//	      assert block.state_root == hash_tree_root(state)
+func CalculateStateRoot(
+	ctx context.Context,
+	rollback state.BeaconState,
+	signed interfaces.ReadOnlySignedBeaconBlock,
+) ([32]byte, error) {
+	st, err := CalculatePostState(ctx, rollback, signed)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return st.HashTreeRoot(ctx)
+}
+
+// CalculatePostState returns the post-block state after processing the given
+// block on a copy of the input state. It is identical to CalculateStateRoot
+// but returns the full state instead of just its hash tree root.
+func CalculatePostState(
+	ctx context.Context,
+	rollback state.BeaconState,
+	signed interfaces.ReadOnlySignedBeaconBlock,
+) (state.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "core.state.CalculatePostState")
+	defer span.End()
+	if ctx.Err() != nil {
+		tracing.AnnotateError(span, ctx.Err())
+		return nil, ctx.Err()
+	}
+	if rollback == nil || rollback.IsNil() {
+		return nil, errors.New("nil state")
+	}
+	if signed == nil || signed.IsNil() || signed.Block().IsNil() {
+		return nil, errors.New("nil block")
+	}
+
+	// Copy state to avoid mutating the state reference.
+	state := rollback.Copy()
+
+	// Execute per slots transition.
+	var err error
+	parentRoot := signed.Block().ParentRoot()
+	state, err = ProcessSlotsUsingNextSlotCache(ctx, state, parentRoot[:], signed.Block().Slot())
+	if err != nil {
+		return nil, errors.Wrap(err, "could not process slots")
+	}
+
+	// Execute per block transition.
+	if features.Get().EnableProposerPreprocessing {
+		state, err = processBlockForProposing(ctx, state, signed)
+		if err != nil {
+			return nil, errors.Wrap(err, "could not process block for proposing")
+		}
+	} else {
+		state, err = ProcessBlockForStateRoot(ctx, state, signed)
+		if err != nil {
+			return nil, errors.Wrap(err, "could not process block")
+		}
+	}
+	return state, nil
+}
+
+// processBlockVerifySigs processes the block and verifies the signatures within it. Block signatures are not verified as this block is not yet signed.
+func processBlockForProposing(ctx context.Context, st state.BeaconState, signed interfaces.ReadOnlySignedBeaconBlock) (state.BeaconState, error) {
+	var err error
+	var set BlockSignatureBatches
+	set, st, err = ProcessBlockNoVerifyAnySig(ctx, st, signed)
+	if err != nil {
+		return nil, err
+	}
+	// We first try to verify all sigantures batched optimistically. We ignore block proposer signature.
+	sigSet := set.Batch()
+	valid, err := sigSet.Verify()
+	if err != nil || valid {
+		return st, err
+	}
+	// Some signature failed to verify.
+	// Verify Attestations signatures
+	attSigs := set.AttestationSignatures
+	if attSigs == nil {
+		return nil, ErrAttestationsSignatureInvalid
+	}
+	valid, err = attSigs.Verify()
+	if err != nil {
+		return nil, err
+	}
+	if !valid {
+		return nil, ErrAttestationsSignatureInvalid
+	}
+
+	// Verify Randao signature
+	randaoSigs := set.RandaoSignatures
+	if randaoSigs == nil {
+		return nil, ErrRandaoSignatureInvalid
+	}
+	valid, err = randaoSigs.Verify()
+	if err != nil {
+		return nil, err
+	}
+	if !valid {
+		return nil, ErrRandaoSignatureInvalid
+	}
+
+	if signed.Block().Version() < version.Capella {
+		//This should not happen as we must have failed one of the above signatures.
+		return st, nil
+	}
+	// Verify BLS to execution changes signatures
+	blsChangeSigs := set.BLSChangeSignatures
+	if blsChangeSigs == nil {
+		return nil, ErrBLSToExecutionChangesSignatureInvalid
+	}
+	valid, err = blsChangeSigs.Verify()
+	if err != nil {
+		return nil, err
+	}
+	if !valid {
+		return nil, ErrBLSToExecutionChangesSignatureInvalid
+	}
+	// We should not reach this point as one of the above signatures must have failed.
+	return st, nil
+}
+
+// BlockSignatureBatches holds the signature batches for different parts of a beacon block.
+type BlockSignatureBatches struct {
+	RandaoSignatures      *bls.SignatureBatch
+	AttestationSignatures *bls.SignatureBatch
+	BLSChangeSignatures   *bls.SignatureBatch
+}
+
+// Batch returns the batch of signature batches in the BlockSignatureBatches.
+func (b BlockSignatureBatches) Batch() *bls.SignatureBatch {
+	sigs := bls.NewSet()
+	if b.RandaoSignatures != nil {
+		sigs.Join(b.RandaoSignatures)
+	}
+	if b.AttestationSignatures != nil {
+		sigs.Join(b.AttestationSignatures)
+	}
+	if b.BLSChangeSignatures != nil {
+		sigs.Join(b.BLSChangeSignatures)
+	}
+	return sigs
+}
+
+// ProcessBlockNoVerifyAnySig creates a new, modified beacon state by applying block operation
+// transformations as defined in the Ethereum Serenity specification. It does not validate
+// any block signature except for deposit and slashing signatures. It also returns the relevant
+// signature set from all the respective methods.
+//
+// Spec pseudocode definition:
+//
+//	def process_block(state: BeaconState, block: ReadOnlyBeaconBlock) -> None:
+//	  process_block_header(state, block)
+//	  process_randao(state, block.body)
+//	  process_eth1_data(state, block.body)
+//	  process_operations(state, block.body)
+func ProcessBlockNoVerifyAnySig(
+	ctx context.Context,
+	st state.BeaconState,
+	signed interfaces.ReadOnlySignedBeaconBlock,
+) (BlockSignatureBatches, state.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "core.state.ProcessBlockNoVerifyAnySig")
+	defer span.End()
+	set := BlockSignatureBatches{}
+	if err := blocks.BeaconBlockIsNil(signed); err != nil {
+		return set, nil, err
+	}
+
+	if st.Version() != signed.Block().Version() {
+		return set, nil, fmt.Errorf("state and block are different version. %d != %d", st.Version(), signed.Block().Version())
+	}
+
+	blk := signed.Block()
+	st, err := ProcessBlockForStateRoot(ctx, st, signed)
+	if err != nil {
+		return set, nil, err
+	}
+
+	randaoReveal := signed.Block().Body().RandaoReveal()
+	rSet, err := b.RandaoSignatureBatch(ctx, st, randaoReveal[:])
+	if err != nil {
+		tracing.AnnotateError(span, err)
+		return set, nil, errors.Wrap(err, "could not retrieve randao signature set")
+	}
+	set.RandaoSignatures = rSet
+	aSet, err := b.AttestationSignatureBatch(ctx, st, signed.Block().Body().Attestations())
+	if err != nil {
+		return set, nil, errors.Wrap(err, "could not retrieve attestation signature set")
+	}
+	set.AttestationSignatures = aSet
+
+	// Merge beacon block, randao and attestations signatures into a set.
+	if blk.Version() >= version.Capella {
+		changes, err := signed.Block().Body().BLSToExecutionChanges()
+		if err != nil {
+			return set, nil, errors.Wrap(err, "could not get BLSToExecutionChanges")
+		}
+		cSet, err := b.BLSChangesSignatureBatch(st, changes)
+		if err != nil {
+			return set, nil, errors.Wrap(err, "could not get BLSToExecutionChanges signatures")
+		}
+		set.BLSChangeSignatures = cSet
+	}
+	return set, st, nil
+}
+
+// ProcessOperationsNoVerifyAttsSigs processes the operations in the beacon block and updates beacon state
+// with the operations in block. It does not verify attestation signatures.
+//
+// WARNING: This method does not verify attestation signatures.
+// This is used to perform the block operations as fast as possible.
+//
+// Spec pseudocode definition:
+//
+//	def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
+//	    # [Modified in Electra:EIP6110]
+//	    # Disable former deposit mechanism once all prior deposits are processed
+//	    eth1_deposit_index_limit = min(state.eth1_data.deposit_count, state.deposit_requests_start_index)
+//	    if state.eth1_deposit_index < eth1_deposit_index_limit:
+//	        assert len(body.deposits) == min(MAX_DEPOSITS, eth1_deposit_index_limit - state.eth1_deposit_index)
+//	    else:
+//	        assert len(body.deposits) == 0
+//
+//	    def for_ops(operations: Sequence[Any], fn: Callable[[BeaconState, Any], None]) -> None:
+//	        for operation in operations:
+//	            fn(state, operation)
+//
+//	    for_ops(body.proposer_slashings, process_proposer_slashing)
+//	    for_ops(body.attester_slashings, process_attester_slashing)
+//	    for_ops(body.attestations, process_attestation)  # [Modified in Electra:EIP7549]
+//	    for_ops(body.deposits, process_deposit)  # [Modified in Electra:EIP7251]
+//	    for_ops(body.voluntary_exits, process_voluntary_exit)  # [Modified in Electra:EIP7251]
+//	    for_ops(body.bls_to_execution_changes, process_bls_to_execution_change)
+//	    # [New in Electra:EIP7002:EIP7251]
+//	    for_ops(body.execution_payload.withdrawal_requests, process_execution_layer_withdrawal_request)
+//	    for_ops(body.execution_payload.deposit_requests, process_deposit_requests)  # [New in Electra:EIP6110]
+//	    for_ops(body.consolidations, process_consolidation)  # [New in Electra:EIP7251]
+func ProcessOperationsNoVerifyAttsSigs(
+	ctx context.Context,
+	state state.BeaconState,
+	beaconBlock interfaces.ReadOnlyBeaconBlock) (state.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "core.state.ProcessOperationsNoVerifyAttsSigs")
+	defer span.End()
+	if beaconBlock == nil || beaconBlock.IsNil() {
+		return nil, blocks.ErrNilBeaconBlock
+	}
+
+	if _, err := VerifyOperationLengths(ctx, state, beaconBlock); err != nil {
+		return nil, errors.Wrap(err, "could not verify operation lengths")
+	}
+
+	blockVersion := beaconBlock.Version()
+	if blockVersion >= version.Gloas {
+		state, err := gloasOperations(ctx, state, beaconBlock)
+		if err != nil {
+			return nil, fmt.Errorf("gloas operations: %w", err)
+		}
+
+		return state, nil
+	}
+
+	if blockVersion >= version.Electra {
+		state, err := electraOperations(ctx, state, beaconBlock)
+		if err != nil {
+			return nil, fmt.Errorf("electra operations: %w", err)
+		}
+
+		return state, nil
+	}
+
+	if blockVersion > version.Phase0 {
+		state, err := altairOperations(ctx, state, beaconBlock)
+		if err != nil {
+			return nil, fmt.Errorf("altair operations: %w", err)
+		}
+
+		return state, nil
+	}
+
+	state, err := phase0Operations(ctx, state, beaconBlock)
+	if err != nil {
+		return nil, fmt.Errorf("phase0 operations: %w", err)
+	}
+
+	return state, nil
+}
+
+// ProcessBlockForStateRoot processes the state for state root computation. It skips proposer signature
+// and randao signature verifications.
+//
+// Spec pseudocode definition:
+// def process_block(state: BeaconState, block: ReadOnlyBeaconBlock) -> None:
+//
+//	process_block_header(state, block)
+//	if is_execution_enabled(state, block.body):
+//	    process_execution_payload(state, block.body.execution_payload, EXECUTION_ENGINE)  # [New in Bellatrix]
+//	process_randao(state, block.body)
+//	process_eth1_data(state, block.body)
+//	process_operations(state, block.body)
+//	process_sync_aggregate(state, block.body.sync_aggregate)
+func ProcessBlockForStateRoot(
+	ctx context.Context,
+	state state.BeaconState,
+	signed interfaces.ReadOnlySignedBeaconBlock,
+) (state.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "core.state.ProcessBlockForStateRoot")
+	defer span.End()
+	if err := blocks.BeaconBlockIsNil(signed); err != nil {
+		return nil, err
+	}
+
+	blk := signed.Block()
+	body := blk.Body()
+
+	if state.Version() >= version.Gloas {
+		if err := gloas.ProcessParentExecutionPayload(ctx, state, blk); err != nil {
+			return nil, errors.Wrap(err, "could not process parent execution payload")
+		}
+	}
+
+	bodyRoot, err := body.HashTreeRoot()
+	if err != nil {
+		return nil, errors.Wrap(err, "could not hash tree root beacon block body")
+	}
+	parentRoot := blk.ParentRoot()
+	state, err = b.ProcessBlockHeaderNoVerify(ctx, state, blk.Slot(), blk.ProposerIndex(), parentRoot[:], bodyRoot[:])
+	if err != nil {
+		tracing.AnnotateError(span, err)
+		return nil, errors.Wrap(err, "could not process block header")
+	}
+
+	if state.Version() >= version.Gloas {
+		// <spec fn="process_block" fork="gloas" hash="7d98b5a3">
+		// def process_block(state: BeaconState, block: BeaconBlock) -> None:
+		//     # [New in Gloas:EIP7732]
+		//     process_parent_execution_payload(state, block)
+		//     process_block_header(state, block)
+		//     # [Modified in Gloas:EIP7732]
+		//     process_withdrawals(state)
+		//     # [Modified in Gloas:EIP7732]
+		//     # Removed `process_execution_payload`
+		//     # [New in Gloas:EIP7732]
+		//     process_execution_payload_bid(state, block.body.signed_execution_payload_bid)
+		//     process_randao(state, block.body)
+		//     process_eth1_data(state, block.body)
+		//     # [Modified in Gloas:EIP7732]
+		//     process_operations(state, block.body)
+		//     process_sync_aggregate(state, block.body.sync_aggregate)
+		// </spec>
+		if err := gloas.ProcessWithdrawals(state); err != nil {
+			return nil, errors.Wrap(ErrProcessWithdrawalsFailed, err.Error())
+		}
+		if err := gloas.ProcessExecutionPayloadBid(state, blk); err != nil {
+			return nil, errors.Wrap(err, "could not process execution payload bid")
+		}
+	} else {
+		enabled, err := b.IsExecutionEnabled(state, blk.Body())
+		if err != nil {
+			return nil, errors.Wrap(err, "could not check if execution is enabled")
+		}
+		if enabled {
+			executionData, err := blk.Body().Execution()
+			if err != nil {
+				return nil, err
+			}
+			if state.Version() >= version.Capella {
+				state, err = b.ProcessWithdrawals(state, executionData)
+				if err != nil {
+					return nil, errors.Wrap(ErrProcessWithdrawalsFailed, err.Error())
+				}
+			}
+			if err = b.ProcessPayload(state, blk.Body()); err != nil {
+				return nil, errors.Wrap(err, "could not process execution data")
+			}
+		}
+	}
+
+	randaoReveal := signed.Block().Body().RandaoReveal()
+	state, err = b.ProcessRandaoNoVerify(state, randaoReveal[:])
+	if err != nil {
+		tracing.AnnotateError(span, err)
+		return nil, errors.Wrap(ErrProcessRandaoFailed, err.Error())
+	}
+
+	state, err = b.ProcessEth1DataInBlock(ctx, state, signed.Block().Body().Eth1Data())
+	if err != nil {
+		tracing.AnnotateError(span, err)
+		return nil, errors.Wrap(ErrProcessEth1DataFailed, err.Error())
+	}
+
+	state, err = ProcessOperationsNoVerifyAttsSigs(ctx, state, signed.Block())
+	if err != nil {
+		tracing.AnnotateError(span, err)
+		return nil, errors.Wrap(err, "could not process block operation")
+	}
+
+	if signed.Block().Version() == version.Phase0 {
+		return state, nil
+	}
+
+	sa, err := signed.Block().Body().SyncAggregate()
+	if err != nil {
+		return nil, errors.Wrap(err, "could not get sync aggregate from block")
+	}
+	state, _, err = altair.ProcessSyncAggregate(ctx, state, sa)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessSyncAggregateFailed, err.Error())
+	}
+
+	return state, nil
+}
+
+// This calls altair block operations.
+func altairOperations(ctx context.Context, st state.BeaconState, beaconBlock interfaces.ReadOnlyBeaconBlock) (state.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "core.state.altairOperations")
+	defer span.End()
+
+	var err error
+
+	hasSlashings := len(beaconBlock.Body().ProposerSlashings()) > 0 || len(beaconBlock.Body().AttesterSlashings()) > 0
+	// exitInfo is only needed for voluntary exits pre Electra.
+	hasExits := st.Version() < version.Electra && len(beaconBlock.Body().VoluntaryExits()) > 0
+	exitInfo := &validators.ExitInfo{}
+	if hasSlashings || hasExits {
+		// ExitInformation is expensive to compute, only do it if we need it.
+		exitInfo = validators.ExitInformation(st)
+		if err := helpers.UpdateTotalActiveBalanceCache(st, exitInfo.TotalActiveBalance); err != nil {
+			return nil, errors.Wrap(err, "could not update total active balance cache")
+		}
+	}
+	st, err = b.ProcessProposerSlashings(ctx, st, beaconBlock.Body().ProposerSlashings(), exitInfo)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessProposerSlashingsFailed, err.Error())
+	}
+	st, err = b.ProcessAttesterSlashings(ctx, st, beaconBlock.Body().AttesterSlashings(), exitInfo)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessAttesterSlashingsFailed, err.Error())
+	}
+	st, err = altair.ProcessAttestationsNoVerifySignature(ctx, st, beaconBlock)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessAttestationsFailed, err.Error())
+	}
+	if _, err := altair.ProcessDeposits(ctx, st, beaconBlock.Body().Deposits()); err != nil {
+		return nil, errors.Wrap(ErrProcessDepositsFailed, err.Error())
+	}
+	st, err = b.ProcessVoluntaryExits(ctx, st, beaconBlock.Body().VoluntaryExits(), exitInfo)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessVoluntaryExitsFailed, err.Error())
+	}
+	st, err = b.ProcessBLSToExecutionChanges(st, beaconBlock)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessBLSChangesFailed, err.Error())
+	}
+	return st, nil
+}
+
+// This calls phase 0 block operations.
+func phase0Operations(ctx context.Context, st state.BeaconState, beaconBlock interfaces.ReadOnlyBeaconBlock) (state.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "core.state.phase0Operations")
+	defer span.End()
+
+	var err error
+	hasSlashings := len(beaconBlock.Body().ProposerSlashings()) > 0 || len(beaconBlock.Body().AttesterSlashings()) > 0
+	hasExits := len(beaconBlock.Body().VoluntaryExits()) > 0
+	var exitInfo *validators.ExitInfo
+	if hasSlashings || hasExits {
+		// ExitInformation is expensive to compute, only do it if we need it.
+		exitInfo = validators.ExitInformation(st)
+		if err := helpers.UpdateTotalActiveBalanceCache(st, exitInfo.TotalActiveBalance); err != nil {
+			return nil, errors.Wrap(err, "could not update total active balance cache")
+		}
+	}
+	st, err = b.ProcessProposerSlashings(ctx, st, beaconBlock.Body().ProposerSlashings(), exitInfo)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessProposerSlashingsFailed, err.Error())
+	}
+	st, err = b.ProcessAttesterSlashings(ctx, st, beaconBlock.Body().AttesterSlashings(), exitInfo)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessAttesterSlashingsFailed, err.Error())
+	}
+	st, err = b.ProcessAttestationsNoVerifySignature(ctx, st, beaconBlock)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessAttestationsFailed, err.Error())
+	}
+	if _, err := altair.ProcessDeposits(ctx, st, beaconBlock.Body().Deposits()); err != nil {
+		return nil, errors.Wrap(ErrProcessDepositsFailed, err.Error())
+	}
+	st, err = b.ProcessVoluntaryExits(ctx, st, beaconBlock.Body().VoluntaryExits(), exitInfo)
+	if err != nil {
+		return nil, errors.Wrap(ErrProcessVoluntaryExitsFailed, err.Error())
+	}
+	return st, nil
+}

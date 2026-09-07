@@ -1,0 +1,239 @@
+package shared
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/rpc/lookup"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state/stategen"
+	"github.com/OffchainLabs/prysm/v7/network/httputil"
+	"github.com/OffchainLabs/prysm/v7/testing/assert"
+	"github.com/pkg/errors"
+)
+
+// TestWriteStateFetchError tests the WriteStateFetchError function
+// to ensure that the correct error message and code are written to the response
+// as an expected JSON format.
+func TestWriteStateFetchError(t *testing.T) {
+	cases := []struct {
+		err             error
+		expectedMessage string
+		expectedCode    int
+	}{
+		{
+			err:             &lookup.StateNotFoundError{},
+			expectedMessage: "State not found",
+			expectedCode:    http.StatusNotFound,
+		},
+		{
+			err:             &lookup.StateIdParseError{},
+			expectedMessage: "Invalid state ID",
+			expectedCode:    http.StatusBadRequest,
+		},
+		{
+			err:             errors.Wrap(stategen.ErrNoDataForSlot, "no data for slot"),
+			expectedMessage: "State not found",
+			expectedCode:    http.StatusNotFound,
+		},
+		{
+			err:             errors.New("state not found"),
+			expectedMessage: "Could not get state",
+			expectedCode:    http.StatusInternalServerError,
+		},
+	}
+
+	for _, c := range cases {
+		writer := httptest.NewRecorder()
+		WriteStateFetchError(writer, c.err)
+
+		assert.Equal(t, c.expectedCode, writer.Code, "incorrect status code")
+		assert.StringContains(t, c.expectedMessage, writer.Body.String(), "incorrect error message")
+
+		e := &httputil.DefaultJsonError{}
+		assert.NoError(t, json.Unmarshal(writer.Body.Bytes(), e), "failed to unmarshal response")
+	}
+}
+
+// TestWriteStateRootFetchError tests the WriteStateRootFetchError function
+// to ensure that the correct error message and code are written to the response
+// and that the function returns the correct boolean value.
+func TestWriteStateRootFetchError(t *testing.T) {
+	cases := []struct {
+		name            string
+		err             error
+		expectedMessage string
+		expectedCode    int
+		expectedReturn  bool
+	}{
+		{
+			name:           "Nil error should return true",
+			err:            nil,
+			expectedReturn: true,
+		},
+		{
+			name:            "StateRootNotFoundError should return 404",
+			err:             &lookup.StateRootNotFoundError{},
+			expectedMessage: "State root not found",
+			expectedCode:    http.StatusNotFound,
+			expectedReturn:  false,
+		},
+		{
+			name:            "StateNotFoundError should return 404",
+			err:             &lookup.StateNotFoundError{},
+			expectedMessage: "State not found",
+			expectedCode:    http.StatusNotFound,
+			expectedReturn:  false,
+		},
+		{
+			name:            "ErrNoDataForSlot should return 404",
+			err:             errors.Wrap(stategen.ErrNoDataForSlot, "no data for slot"),
+			expectedMessage: "State not found",
+			expectedCode:    http.StatusNotFound,
+			expectedReturn:  false,
+		},
+		{
+			name:            "StateIdParseError should return 400",
+			err:             &lookup.StateIdParseError{},
+			expectedMessage: "Invalid state ID",
+			expectedCode:    http.StatusBadRequest,
+			expectedReturn:  false,
+		},
+		{
+			name:            "Generic error should return 500",
+			err:             errors.New("database connection failed"),
+			expectedMessage: "Could not get state root",
+			expectedCode:    http.StatusInternalServerError,
+			expectedReturn:  false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writer := httptest.NewRecorder()
+			result := WriteStateRootFetchError(writer, c.err)
+
+			assert.Equal(t, c.expectedReturn, result, "incorrect return value")
+			if !c.expectedReturn {
+				assert.Equal(t, c.expectedCode, writer.Code, "incorrect status code")
+				assert.StringContains(t, c.expectedMessage, writer.Body.String(), "incorrect error message")
+
+				e := &httputil.DefaultJsonError{}
+				assert.NoError(t, json.Unmarshal(writer.Body.Bytes(), e), "failed to unmarshal response")
+			}
+		})
+	}
+}
+
+// TestWriteBlockFetchError tests the WriteBlockFetchError function
+// to ensure that the correct error message and code are written to the response
+// and that the function returns the correct boolean value.
+func TestWriteBlockFetchError(t *testing.T) {
+	cases := []struct {
+		name            string
+		err             error
+		expectedMessage string
+		expectedCode    int
+		expectedReturn  bool
+	}{
+		{
+			name:            "BlockNotFoundError should return 404",
+			err:             lookup.NewBlockNotFoundError("block not found at slot 123"),
+			expectedMessage: "Block not found",
+			expectedCode:    http.StatusNotFound,
+			expectedReturn:  false,
+		},
+		{
+			name:            "BlockIdParseError should return 400",
+			err:             &lookup.BlockIdParseError{},
+			expectedMessage: "Invalid block ID",
+			expectedCode:    http.StatusBadRequest,
+			expectedReturn:  false,
+		},
+		{
+			name:            "Generic error should return 500",
+			err:             errors.New("database connection failed"),
+			expectedMessage: "Could not get block from block ID",
+			expectedCode:    http.StatusInternalServerError,
+			expectedReturn:  false,
+		},
+		{
+			name:            "Nil block should return 404",
+			err:             nil,
+			expectedMessage: "Could not find requested block",
+			expectedCode:    http.StatusNotFound,
+			expectedReturn:  false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writer := httptest.NewRecorder()
+			result := WriteBlockFetchError(writer, nil, c.err)
+
+			assert.Equal(t, c.expectedReturn, result, "incorrect return value")
+			assert.Equal(t, c.expectedCode, writer.Code, "incorrect status code")
+			assert.StringContains(t, c.expectedMessage, writer.Body.String(), "incorrect error message")
+
+			e := &httputil.DefaultJsonError{}
+			assert.NoError(t, json.Unmarshal(writer.Body.Bytes(), e), "failed to unmarshal response")
+		})
+	}
+}
+
+// TestWriteBlockRootFetchError tests the WriteBlockRootFetchError function
+// to ensure that the correct error message and code are written to the response
+// and that the function returns the correct boolean value.
+func TestWriteBlockRootFetchError(t *testing.T) {
+	cases := []struct {
+		name            string
+		err             error
+		expectedMessage string
+		expectedCode    int
+		expectedReturn  bool
+	}{
+		{
+			name:           "Nil error should return true",
+			err:            nil,
+			expectedReturn: true,
+		},
+		{
+			name:            "BlockNotFoundError should return 404",
+			err:             lookup.NewBlockNotFoundError("block not found at slot 123"),
+			expectedMessage: "Block not found",
+			expectedCode:    http.StatusNotFound,
+			expectedReturn:  false,
+		},
+		{
+			name:            "BlockIdParseError should return 400",
+			err:             &lookup.BlockIdParseError{},
+			expectedMessage: "Invalid block ID",
+			expectedCode:    http.StatusBadRequest,
+			expectedReturn:  false,
+		},
+		{
+			name:            "Generic error should return 500",
+			err:             errors.New("database connection failed"),
+			expectedMessage: "Could not get block root from block ID",
+			expectedCode:    http.StatusInternalServerError,
+			expectedReturn:  false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writer := httptest.NewRecorder()
+			result := WriteBlockRootFetchError(writer, c.err)
+
+			assert.Equal(t, c.expectedReturn, result, "incorrect return value")
+			if !c.expectedReturn {
+				assert.Equal(t, c.expectedCode, writer.Code, "incorrect status code")
+				assert.StringContains(t, c.expectedMessage, writer.Body.String(), "incorrect error message")
+
+				e := &httputil.DefaultJsonError{}
+				assert.NoError(t, json.Unmarshal(writer.Body.Bytes(), e), "failed to unmarshal response")
+			}
+		})
+	}
+}

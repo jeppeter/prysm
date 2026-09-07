@@ -1,0 +1,284 @@
+package testing
+
+import (
+	"context"
+	"math/big"
+
+	"github.com/OffchainLabs/prysm/v7/api/server/structs"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/peerdas"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/interfaces"
+	payloadattribute "github.com/OffchainLabs/prysm/v7/consensus-types/payload-attribute"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	pb "github.com/OffchainLabs/prysm/v7/proto/engine/v1"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/holiman/uint256"
+	"github.com/pkg/errors"
+)
+
+// EngineClient --
+type EngineClient struct {
+	NewPayloadResp              []byte
+	PayloadIDBytes              *pb.PayloadIDBytes
+	ForkChoiceUpdatedResp       []byte
+	ExecutionBlock              *pb.ExecutionBlock
+	Err                         error
+	ErrLatestExecBlock          error
+	ErrExecBlockByHash          error
+	ErrForkchoiceUpdated        error
+	ErrNewPayload               error
+	ExecutionPayloadByBlockHash map[[32]byte]*pb.ExecutionPayload
+	SlotByBlockHash             map[[32]byte]primitives.Slot
+	BlockByHashMap              map[[32]byte]*pb.ExecutionBlock
+	NumReconstructedPayloads    uint64
+	TerminalBlockHash           []byte
+	TerminalBlockHashExists     bool
+	PartialColumnsSupportedFlag bool
+	OverrideValidHash           [32]byte
+	GetPayloadResponse          *blocks.GetPayloadResponse
+	ErrGetPayload               error
+	BlobSidecars                []blocks.VerifiedROBlob
+	ErrorBlobSidecars           error
+	DataColumnSidecars          []blocks.VerifiedRODataColumn
+	ErrorDataColumnSidecars     error
+	HasBlobsPartialColumns      []blocks.PartialDataColumn
+	ClientVersion               []*structs.ClientVersionV1
+	ErrorClientVersion          error
+	FetchedAttributes           payloadattribute.Attributer
+}
+
+// PartialColumnsSupported --
+func (e *EngineClient) PartialColumnsSupported() bool {
+	return e.PartialColumnsSupportedFlag
+}
+
+// NewPayload --
+func (e *EngineClient) NewPayload(_ context.Context, _ interfaces.ExecutionData, _ []common.Hash, _ *common.Hash, _ pb.ExecutionRequester) ([]byte, error) {
+	return e.NewPayloadResp, e.ErrNewPayload
+}
+
+// ForkchoiceUpdated --
+func (e *EngineClient) ForkchoiceUpdated(
+	_ context.Context, fcs *pb.ForkchoiceState, attr payloadattribute.Attributer,
+) (*pb.PayloadIDBytes, []byte, error) {
+	e.FetchedAttributes = attr
+	if e.OverrideValidHash != [32]byte{} && bytesutil.ToBytes32(fcs.HeadBlockHash) == e.OverrideValidHash {
+		return e.PayloadIDBytes, e.ForkChoiceUpdatedResp, nil
+	}
+	return e.PayloadIDBytes, e.ForkChoiceUpdatedResp, e.ErrForkchoiceUpdated
+}
+
+// GetPayload --
+func (e *EngineClient) GetPayload(_ context.Context, _ [8]byte, _ primitives.Slot) (*blocks.GetPayloadResponse, error) {
+	return e.GetPayloadResponse, e.ErrGetPayload
+}
+
+// LatestExecutionBlock --
+func (e *EngineClient) LatestExecutionBlock(_ context.Context) (*pb.ExecutionBlock, error) {
+	return e.ExecutionBlock, e.ErrLatestExecBlock
+}
+
+// ExecutionBlockByHash --
+func (e *EngineClient) ExecutionBlockByHash(_ context.Context, h common.Hash, _ bool) (*pb.ExecutionBlock, error) {
+	b, ok := e.BlockByHashMap[h]
+	if !ok {
+		return nil, errors.New("block not found")
+	}
+	return b, e.ErrExecBlockByHash
+}
+
+// ReconstructFullBlock --
+func (e *EngineClient) ReconstructFullBlock(
+	_ context.Context, blindedBlock interfaces.ReadOnlySignedBeaconBlock,
+) (interfaces.SignedBeaconBlock, error) {
+	if !blindedBlock.Block().IsBlinded() {
+		return nil, errors.New("block must be blinded")
+	}
+	header, err := blindedBlock.Block().Body().Execution()
+	if err != nil {
+		return nil, err
+	}
+	payload, ok := e.ExecutionPayloadByBlockHash[bytesutil.ToBytes32(header.BlockHash())]
+	if !ok {
+		return nil, errors.New("block not found")
+	}
+	e.NumReconstructedPayloads++
+	return blocks.BuildSignedBeaconBlockFromExecutionPayload(blindedBlock, payload)
+}
+
+// ReconstructFullBellatrixBlockBatch --
+func (e *EngineClient) ReconstructFullBellatrixBlockBatch(
+	ctx context.Context, blindedBlocks []interfaces.ReadOnlySignedBeaconBlock,
+) ([]interfaces.SignedBeaconBlock, error) {
+	fullBlocks := make([]interfaces.SignedBeaconBlock, 0, len(blindedBlocks))
+	for _, b := range blindedBlocks {
+		newBlock, err := e.ReconstructFullBlock(ctx, b)
+		if err != nil {
+			return nil, err
+		}
+		fullBlocks = append(fullBlocks, newBlock)
+	}
+	return fullBlocks, nil
+}
+
+// ReconstructFullGloasExecutionPayloadsByHash --
+func (e *EngineClient) ReconstructFullGloasExecutionPayloadsByHash(
+	_ context.Context, blockHashes [][32]byte,
+) (map[[32]byte]*pb.ExecutionPayloadGloas, error) {
+	payloads := make(map[[32]byte]*pb.ExecutionPayloadGloas, len(blockHashes))
+	for i := range blockHashes {
+		blockHash := blockHashes[i]
+		if p, ok := e.ExecutionPayloadByBlockHash[blockHash]; ok {
+			payloads[blockHash] = &pb.ExecutionPayloadGloas{
+				ParentHash:    p.ParentHash,
+				FeeRecipient:  p.FeeRecipient,
+				StateRoot:     p.StateRoot,
+				ReceiptsRoot:  p.ReceiptsRoot,
+				LogsBloom:     p.LogsBloom,
+				PrevRandao:    p.PrevRandao,
+				BlockNumber:   p.BlockNumber,
+				GasLimit:      p.GasLimit,
+				GasUsed:       p.GasUsed,
+				Timestamp:     p.Timestamp,
+				ExtraData:     p.ExtraData,
+				BaseFeePerGas: p.BaseFeePerGas,
+				BlockHash:     p.BlockHash,
+				Transactions:  p.Transactions,
+				Withdrawals:   []*pb.Withdrawal{},
+				SlotNumber:    e.SlotByBlockHash[blockHash],
+			}
+			continue
+		}
+		if e.GetPayloadResponse != nil && e.GetPayloadResponse.ExecutionData != nil {
+			if p, ok := e.GetPayloadResponse.ExecutionData.Proto().(*pb.ExecutionPayloadGloas); ok {
+				payloads[blockHash] = p
+				continue
+			}
+		}
+		return nil, errors.New("payload not found")
+	}
+	return payloads, nil
+}
+
+// ReconstructBlobSidecars is a mock implementation of the ReconstructBlobSidecars method.
+func (e *EngineClient) ReconstructBlobSidecars(context.Context, interfaces.ReadOnlySignedBeaconBlock, [fieldparams.RootLength]byte, func(uint64) bool) ([]blocks.VerifiedROBlob, error) {
+	return e.BlobSidecars, e.ErrorBlobSidecars
+}
+
+// ConstructDataColumnSidecars is a mock implementation of the ConstructDataColumnSidecars method.
+func (e *EngineClient) ConstructDataColumnSidecars(context.Context, peerdas.ConstructionPopulator) ([]blocks.VerifiedRODataColumn, []blocks.PartialDataColumn, error) {
+	return e.DataColumnSidecars, nil, e.ErrorDataColumnSidecars
+}
+
+// ConstructPartialDataColumnSidecarsFromHasBlobs is a mock implementation of the ConstructPartialDataColumnSidecarsFromHasBlobs method.
+func (e *EngineClient) ConstructPartialDataColumnSidecarsFromHasBlobs(context.Context, peerdas.ConstructionPopulator) ([]blocks.PartialDataColumn, bool, error) {
+	if e.HasBlobsPartialColumns == nil {
+		return nil, false, nil
+	}
+	return e.HasBlobsPartialColumns, true, nil
+}
+
+// ReconstructExecutionPayloadEnvelope --
+func (e *EngineClient) ReconstructExecutionPayloadEnvelope(
+	_ context.Context, envelope *ethpb.SignedBlindedExecutionPayloadEnvelope,
+) (*ethpb.SignedExecutionPayloadEnvelope, error) {
+	if e.Err != nil {
+		return nil, e.Err
+	}
+	payload, ok := e.ExecutionPayloadByBlockHash[bytesutil.ToBytes32(envelope.Message.BlockHash)]
+	if !ok {
+		return nil, errors.New("execution payload not found for block hash")
+	}
+	p := payloadToPayloadGloas(payload)
+	p.SlotNumber = envelope.Message.Slot
+	return &ethpb.SignedExecutionPayloadEnvelope{
+		Message: &ethpb.ExecutionPayloadEnvelope{
+			Payload:           p,
+			ExecutionRequests: envelope.Message.ExecutionRequests,
+			BuilderIndex:      envelope.Message.BuilderIndex,
+			BeaconBlockRoot:   envelope.Message.BeaconBlockRoot,
+		},
+		Signature: envelope.Signature,
+	}, nil
+}
+
+func payloadToPayloadGloas(p *pb.ExecutionPayload) *pb.ExecutionPayloadGloas {
+	return &pb.ExecutionPayloadGloas{
+		ParentHash:    p.ParentHash,
+		FeeRecipient:  p.FeeRecipient,
+		StateRoot:     p.StateRoot,
+		ReceiptsRoot:  p.ReceiptsRoot,
+		LogsBloom:     p.LogsBloom,
+		PrevRandao:    p.PrevRandao,
+		BlockNumber:   p.BlockNumber,
+		GasLimit:      p.GasLimit,
+		GasUsed:       p.GasUsed,
+		Timestamp:     p.Timestamp,
+		ExtraData:     p.ExtraData,
+		BaseFeePerGas: p.BaseFeePerGas,
+		BlockHash:     p.BlockHash,
+		Transactions:  p.Transactions,
+	}
+}
+
+// GetTerminalBlockHash --
+func (e *EngineClient) GetTerminalBlockHash(ctx context.Context, transitionTime uint64) ([]byte, bool, error) {
+	ttd := new(big.Int)
+	ttd.SetString(params.BeaconConfig().TerminalTotalDifficulty, 10)
+	terminalTotalDifficulty, overflows := uint256.FromBig(ttd)
+	if overflows {
+		return nil, false, errors.New("could not convert terminal total difficulty to uint256")
+	}
+	blk, err := e.LatestExecutionBlock(ctx)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "could not get latest execution block")
+	}
+	if blk == nil {
+		return nil, false, errors.New("latest execution block is nil")
+	}
+
+	for {
+		b, err := hexutil.DecodeBig(blk.TotalDifficulty)
+		if err != nil {
+			return nil, false, errors.Wrap(err, "could not convert total difficulty to uint256")
+		}
+		currentTotalDifficulty, _ := uint256.FromBig(b)
+		blockReachedTTD := currentTotalDifficulty.Cmp(terminalTotalDifficulty) >= 0
+
+		parentHash := blk.ParentHash
+		if parentHash == params.BeaconConfig().ZeroHash {
+			return nil, false, nil
+		}
+		parentBlk, err := e.ExecutionBlockByHash(ctx, parentHash, false /* with txs */)
+		if err != nil {
+			return nil, false, errors.Wrap(err, "could not get parent execution block")
+		}
+		if blockReachedTTD {
+			b, err := hexutil.DecodeBig(parentBlk.TotalDifficulty)
+			if err != nil {
+				return nil, false, errors.Wrap(err, "could not convert total difficulty to uint256")
+			}
+			parentTotalDifficulty, _ := uint256.FromBig(b)
+			parentReachedTTD := parentTotalDifficulty.Cmp(terminalTotalDifficulty) >= 0
+			if blk.Time >= transitionTime {
+				return nil, false, nil
+			}
+			if !parentReachedTTD {
+				return blk.Hash[:], true, nil
+			}
+		} else {
+			return nil, false, nil
+		}
+		blk = parentBlk
+	}
+}
+
+// GetClientVersionV1 --
+func (e *EngineClient) GetClientVersionV1(context.Context) ([]*structs.ClientVersionV1, error) {
+	return e.ClientVersion, e.ErrorClientVersion
+}

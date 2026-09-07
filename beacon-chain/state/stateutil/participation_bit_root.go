@@ -1,0 +1,65 @@
+package stateutil
+
+import (
+	"encoding/binary"
+
+	"github.com/OffchainLabs/prysm/v7/config/features"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/encoding/ssz"
+	"github.com/pkg/errors"
+)
+
+// ParticipationBitsRoot computes the HashTreeRoot merkleization of
+// participation roots for the supplied state version.
+func ParticipationBitsRoot(stateVersion int, bits []byte) ([32]byte, error) {
+	if features.ProgressiveSSZEnabled(stateVersion) {
+		return participationBitsRootProgressive(bits)
+	}
+	return participationBitsRoot(bits)
+}
+
+func participationBitsRoot(bits []byte) ([32]byte, error) {
+	chunkedRoots, err := packParticipationBits(bits)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	limit := (uint64(fieldparams.ValidatorRegistryLimit + 31)) / 32
+
+	bytesRoot, err := ssz.BitwiseMerkleize(chunkedRoots, uint64(len(chunkedRoots)), limit)
+	if err != nil {
+		return [32]byte{}, errors.Wrap(err, "could not compute merkleization")
+	}
+
+	bytesRootBufRoot := make([]byte, 32)
+	binary.LittleEndian.PutUint64(bytesRootBufRoot[:8], uint64(len(bits)))
+	return ssz.MixInLength(bytesRoot, bytesRootBufRoot), nil
+}
+
+func participationBitsRootProgressive(bits []byte) ([32]byte, error) {
+	return ssz.ByteSliceRootProgressive(bits)
+}
+
+// packParticipationBits into chunks. It'll pad the last chunk with zero bytes if
+// it does not have length bytes per chunk.
+func packParticipationBits(bytes []byte) ([][32]byte, error) {
+	numItems := len(bytes)
+	chunks := make([][32]byte, 0, numItems/32)
+	for i := 0; i < numItems; i += 32 {
+		j := min(
+			// We create our upper bound index of the chunk, if it is greater than numItems,
+			// we set it as numItems itself.
+			i+32, numItems)
+		// We create chunks from the list of items based on the
+		// indices determined above.
+		var chunk [32]byte
+		copy(chunk[:], bytes[i:j])
+		chunks = append(chunks, chunk)
+	}
+
+	if len(chunks) == 0 {
+		return chunks, nil
+	}
+
+	return chunks, nil
+}

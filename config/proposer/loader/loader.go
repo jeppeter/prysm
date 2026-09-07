@@ -1,0 +1,458 @@
+package loader
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/OffchainLabs/prysm/v7/cmd/validator/flags"
+	"github.com/OffchainLabs/prysm/v7/config"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/config/proposer"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/validator"
+	validatorpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1/validator-client"
+	"github.com/OffchainLabs/prysm/v7/validator/db/iface"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/pkg/errors"
+	"github.com/urfave/cli/v2"
+)
+
+type settingsType int
+
+const (
+	none settingsType = iota
+	defaultFlag
+	fileFlag
+	urlFlag
+	onlyDB
+)
+
+type SettingsLoader struct {
+	loadMethods []settingsType
+	existsInDB  bool
+	db          iface.ValidatorDB
+	options     *flagOptions
+}
+
+type flagOptions struct {
+	builderConfig *proposer.BuilderConfig
+	gasLimit      *validator.Uint64
+}
+
+// SettingsLoaderOption sets additional options that affect the proposer settings
+type SettingsLoaderOption func(cliCtx *cli.Context, psl *SettingsLoader) error
+
+// WithBuilderConfig applies the --enable-builder flag to proposer settings
+func WithBuilderConfig() SettingsLoaderOption {
+	return func(cliCtx *cli.Context, psl *SettingsLoader) error {
+		if cliCtx.Bool(flags.EnableBuilderFlag.Name) {
+			psl.options.builderConfig = &proposer.BuilderConfig{
+				Enabled:  true,
+				GasLimit: validator.Uint64(params.BeaconConfig().DefaultBuilderGasLimit),
+			}
+		}
+		return nil
+	}
+}
+
+// WithGasLimit applies the --suggested-gas-limit flag to proposer settings
+func WithGasLimit() SettingsLoaderOption {
+	return func(cliCtx *cli.Context, psl *SettingsLoader) error {
+		if !cliCtx.IsSet(flags.BuilderGasLimitFlag.Name) {
+			return nil
+		}
+		sgl := cliCtx.String(flags.BuilderGasLimitFlag.Name)
+		if sgl != "" {
+			gl, err := strconv.ParseUint(sgl, 10, 64)
+			if err != nil {
+				return errors.Errorf("Value set by --%s is not a uint64", flags.BuilderGasLimitFlag.Name)
+			}
+			if gl == 0 {
+				log.Warnf("Gas limit was intentionally set to 0, this will be replaced with the default gas limit of %d", params.BeaconConfig().DefaultBuilderGasLimit)
+			}
+			rgl := reviewGasLimit(validator.Uint64(gl))
+			psl.options.gasLimit = &rgl
+		}
+		return nil
+	}
+}
+
+// NewProposerSettingsLoader returns a new proposer settings loader that can process the proposer settings based on flag options
+func NewProposerSettingsLoader(cliCtx *cli.Context, db iface.ValidatorDB, opts ...SettingsLoaderOption) (*SettingsLoader, error) {
+	if cliCtx.IsSet(flags.ProposerSettingsFlag.Name) && cliCtx.IsSet(flags.ProposerSettingsURLFlag.Name) {
+		return nil, fmt.Errorf("cannot specify both --%s and --%s flags; choose one method for specifying proposer settings", flags.ProposerSettingsFlag.Name, flags.ProposerSettingsURLFlag.Name)
+	}
+	psExists, err := db.ProposerSettingsExists(cliCtx.Context)
+	if err != nil {
+		return nil, err
+	}
+	psl := &SettingsLoader{db: db, existsInDB: psExists, options: &flagOptions{}}
+
+	psl.loadMethods = determineLoadMethods(cliCtx, psl.existsInDB)
+
+	for _, o := range opts {
+		if err := o(cliCtx, psl); err != nil {
+			return nil, err
+		}
+	}
+
+	return psl, nil
+}
+
+func determineLoadMethods(cliCtx *cli.Context, loadedFromDB bool) []settingsType {
+	var methods []settingsType
+
+	if cliCtx.IsSet(flags.SuggestedFeeRecipientFlag.Name) {
+		methods = append(methods, defaultFlag)
+	}
+	if cliCtx.IsSet(flags.ProposerSettingsFlag.Name) {
+		methods = append(methods, fileFlag)
+	}
+	if cliCtx.IsSet(flags.ProposerSettingsURLFlag.Name) {
+		methods = append(methods, urlFlag)
+	}
+	if len(methods) == 0 && loadedFromDB {
+		methods = append(methods, onlyDB)
+	}
+	if len(methods) == 0 {
+		methods = append(methods, none)
+	}
+
+	return methods
+}
+
+// Load saves the proposer settings to the database
+func (psl *SettingsLoader) Load(cliCtx *cli.Context) (*proposer.Settings, error) {
+	var loadedSettings, dbSettings *validatorpb.ProposerSettingsPayload
+
+	// override settings based on other options
+	psl.applyOverrides()
+
+	// check if database has settings already
+	if psl.existsInDB {
+		dbps, err := psl.db.ProposerSettings(cliCtx.Context)
+		if err != nil {
+			return nil, err
+		}
+		dbSettings = dbps.ToConsensus()
+		log.WithField("version", dbSettings.Version).
+			WithField("proposerConfigCount", len(dbSettings.ProposerConfig)).
+			Debug("Loaded proposer settings from DB")
+	}
+
+	// start to process based on load method
+	for _, method := range psl.loadMethods {
+		var err error
+		switch method {
+		case defaultFlag:
+			loadedSettings, err = psl.loadFromDefault(cliCtx, dbSettings)
+			if err != nil {
+				return nil, err
+			}
+		case fileFlag:
+			loadedSettings, err = psl.loadFromFile(cliCtx, dbSettings)
+			if err != nil {
+				return nil, err
+			}
+		case urlFlag:
+			loadedSettings, err = psl.loadFromURL(cliCtx, dbSettings)
+			if err != nil {
+				return nil, err
+			}
+		case onlyDB, none:
+			loadedSettings = psl.processProposerSettings(&validatorpb.ProposerSettingsPayload{}, dbSettings)
+			if psl.existsInDB {
+				log.Info("Proposer settings loaded from the DB")
+			}
+		default:
+			return nil, errors.New("load method for proposer settings does not exist")
+		}
+	}
+
+	// exit early if nothing is provided
+	if loadedSettings == nil || (loadedSettings.ProposerConfig == nil && loadedSettings.DefaultConfig == nil) {
+		log.Warn("No proposer settings were provided")
+		return nil, nil
+	}
+	ps, err := proposer.SettingFromConsensus(loadedSettings)
+	if err != nil {
+		return nil, err
+	}
+	ps.WarnDeprecatedSchema()
+	ps.WarnUnsetMaxExecutionPayment()
+	if err := psl.db.SaveProposerSettings(cliCtx.Context, ps); err != nil {
+		return nil, err
+	}
+	return ps, nil
+}
+
+func (psl *SettingsLoader) applyOverrides() {
+	if psl.options.builderConfig != nil && psl.options.gasLimit != nil {
+		psl.options.builderConfig.GasLimit = *psl.options.gasLimit
+	}
+}
+
+func (psl *SettingsLoader) loadFromDefault(cliCtx *cli.Context, dbSettings *validatorpb.ProposerSettingsPayload) (*validatorpb.ProposerSettingsPayload, error) {
+	suggestedFeeRecipient := cliCtx.String(flags.SuggestedFeeRecipientFlag.Name)
+	if !common.IsHexAddress(suggestedFeeRecipient) {
+		return nil, errors.Errorf("--%s is not a valid Ethereum address", flags.SuggestedFeeRecipientFlag.Name)
+	}
+	if err := config.WarnNonChecksummedAddress(suggestedFeeRecipient); err != nil {
+		return nil, err
+	}
+
+	if psl.existsInDB && len(psl.loadMethods) == 1 {
+		// only log the below if default flag is the only load method
+		log.Debug("Overriding previously saved proposer default settings.")
+	}
+	log.WithField(flags.SuggestedFeeRecipientFlag.Name, cliCtx.String(flags.SuggestedFeeRecipientFlag.Name)).Info("Proposer settings loaded from default")
+	return psl.processProposerSettings(&validatorpb.ProposerSettingsPayload{DefaultConfig: &validatorpb.ProposerOptionPayload{
+		FeeRecipient: suggestedFeeRecipient,
+	}}, dbSettings), nil
+}
+
+func (psl *SettingsLoader) loadFromFile(cliCtx *cli.Context, dbSettings *validatorpb.ProposerSettingsPayload) (*validatorpb.ProposerSettingsPayload, error) {
+	var settingFromFile *validatorpb.ProposerSettingsPayload
+	if err := config.UnmarshalFromFile(cliCtx.String(flags.ProposerSettingsFlag.Name), &settingFromFile); err != nil {
+		return nil, err
+	}
+	if settingFromFile == nil {
+		return nil, errors.Errorf("proposer settings is empty after unmarshalling from file specified by %s flag", flags.ProposerSettingsFlag.Name)
+	}
+	markExplicitEmptyBuilders(settingFromFile)
+	inferSchemaVersion(settingFromFile)
+	log.WithField(flags.ProposerSettingsFlag.Name, cliCtx.String(flags.ProposerSettingsFlag.Name)).Info("Proposer settings loaded from file")
+	return psl.processProposerSettings(settingFromFile, dbSettings), nil
+}
+
+func (psl *SettingsLoader) loadFromURL(cliCtx *cli.Context, dbSettings *validatorpb.ProposerSettingsPayload) (*validatorpb.ProposerSettingsPayload, error) {
+	var settingFromURL *validatorpb.ProposerSettingsPayload
+	if err := config.UnmarshalFromURL(cliCtx.Context, cliCtx.String(flags.ProposerSettingsURLFlag.Name), &settingFromURL); err != nil {
+		return nil, err
+	}
+	if settingFromURL == nil {
+		return nil, errors.Errorf("proposer settings is empty after unmarshalling from url specified by %s flag", flags.ProposerSettingsURLFlag.Name)
+	}
+	markExplicitEmptyBuilders(settingFromURL)
+	inferSchemaVersion(settingFromURL)
+	log.WithField(flags.ProposerSettingsURLFlag.Name, cliCtx.String(flags.ProposerSettingsURLFlag.Name)).Infof("Proposer settings loaded from URL")
+	return psl.processProposerSettings(settingFromURL, dbSettings), nil
+}
+
+func (psl *SettingsLoader) processProposerSettings(loadedSettings, dbSettings *validatorpb.ProposerSettingsPayload) *validatorpb.ProposerSettingsPayload {
+	if loadedSettings == nil && dbSettings == nil {
+		return nil
+	}
+
+	// Merge settings with priority: loadedSettings > dbSettings
+	newSettings := mergeProposerSettings(loadedSettings, dbSettings, psl.options)
+
+	// Return nil if settings remain empty
+	if newSettings.DefaultConfig == nil && len(newSettings.ProposerConfig) == 0 {
+		return nil
+	}
+
+	return newSettings
+}
+
+// mergeProposerSettings merges database settings with loaded settings, giving
+// precedence to loadedSettings. Dispatches by schema version: v1 still flows
+// through Builder; v2 lives on Option directly.
+func mergeProposerSettings(loaded, db *validatorpb.ProposerSettingsPayload, options *flagOptions) *validatorpb.ProposerSettingsPayload {
+	merged := &validatorpb.ProposerSettingsPayload{}
+	if db != nil {
+		merged.Version = db.Version
+	}
+	if loaded != nil && loaded.Version > merged.Version {
+		merged.Version = loaded.Version
+	}
+
+	var builderConfig *validatorpb.BuilderConfig
+	var gasLimitOnly *validator.Uint64
+	if options != nil {
+		if options.builderConfig != nil {
+			builderConfig = options.builderConfig.ToConsensus()
+		}
+		gasLimitOnly = options.gasLimit
+	}
+
+	if merged.Version == proposer.SchemaV2 {
+		return mergeProposerSettingsV2(merged, loaded, db, builderConfig, gasLimitOnly)
+	}
+	return mergeProposerSettingsV1(merged, loaded, db, builderConfig, gasLimitOnly)
+}
+
+// markExplicitEmptyBuilders stamps the persistence marker for a user source's
+// explicit "builders": [] (opt-out), which yaml keeps distinct from absent.
+func markExplicitEmptyBuilders(p *validatorpb.ProposerSettingsPayload) {
+	mark := func(opt *validatorpb.ProposerOptionPayload) {
+		if opt == nil || opt.Builder == nil {
+			return
+		}
+		if opt.Builder.Builders != nil {
+			opt.Builder.BuildersSet = true
+		}
+	}
+	mark(p.DefaultConfig)
+	for _, opt := range p.ProposerConfig {
+		mark(opt)
+	}
+}
+
+// inferSchemaVersion stamps version 2 on an unversioned source carrying v2-only
+// builder fields, so a forgotten "version" cannot get gloas content dropped as v1.
+func inferSchemaVersion(p *validatorpb.ProposerSettingsPayload) {
+	if p.Version != proposer.SchemaV1Unset {
+		return
+	}
+	hasV2 := func(opt *validatorpb.ProposerOptionPayload) bool {
+		if opt == nil || opt.Builder == nil {
+			return false
+		}
+		b := opt.Builder
+		return len(b.Builders) > 0 || b.BuildersSet || b.MinBid != nil ||
+			b.BuilderBoostFactor != nil || b.MaxExecutionPayment != nil
+	}
+	found := hasV2(p.DefaultConfig)
+	for _, opt := range p.ProposerConfig {
+		if found {
+			break
+		}
+		found = hasV2(opt)
+	}
+	if !found {
+		return
+	}
+	p.Version = proposer.SchemaV2
+	log.Info("Proposer settings contain v2 builder fields but no version; treating the source as version 2")
+}
+
+// selectProposerConfig keeps the pre-v2 source precedence: a loaded per-key
+// section replaces the DB's entirely, so restarting with a file resets the DB.
+func selectProposerConfig(db, loaded *validatorpb.ProposerSettingsPayload) map[string]*validatorpb.ProposerOptionPayload {
+	if loaded != nil && len(loaded.ProposerConfig) > 0 {
+		return loaded.ProposerConfig
+	}
+	if db != nil && len(db.ProposerConfig) > 0 {
+		return db.ProposerConfig
+	}
+	return nil
+}
+
+func mergeProposerSettingsV1(merged, loaded, db *validatorpb.ProposerSettingsPayload, builderConfig *validatorpb.BuilderConfig, gasLimitOnly *validator.Uint64) *validatorpb.ProposerSettingsPayload {
+	stripDBBuilder := builderConfig == nil
+
+	if db != nil && db.DefaultConfig != nil {
+		merged.DefaultConfig = db.DefaultConfig
+		if stripDBBuilder {
+			db.DefaultConfig.Builder = nil
+		}
+	}
+	if loaded != nil && loaded.DefaultConfig != nil {
+		merged.DefaultConfig = loaded.DefaultConfig
+	}
+
+	if db != nil && stripDBBuilder {
+		for _, option := range db.ProposerConfig {
+			option.Builder = nil
+		}
+	}
+	merged.ProposerConfig = selectProposerConfig(db, loaded)
+
+	if merged.DefaultConfig != nil {
+		merged.DefaultConfig.Builder = processBuilderConfig(merged.DefaultConfig.Builder, builderConfig, gasLimitOnly)
+	}
+	for _, option := range merged.ProposerConfig {
+		if option != nil {
+			option.Builder = processBuilderConfig(option.Builder, builderConfig, gasLimitOnly)
+		}
+	}
+
+	if merged.DefaultConfig == nil {
+		switch {
+		case builderConfig != nil:
+			merged.DefaultConfig = &validatorpb.ProposerOptionPayload{Builder: builderConfig}
+		case gasLimitOnly != nil:
+			merged.DefaultConfig = &validatorpb.ProposerOptionPayload{
+				Builder: &validatorpb.BuilderConfig{GasLimit: *gasLimitOnly},
+			}
+		}
+	}
+	return merged
+}
+
+func mergeProposerSettingsV2(merged, loaded, db *validatorpb.ProposerSettingsPayload, builderConfig *validatorpb.BuilderConfig, gasLimitOnly *validator.Uint64) *validatorpb.ProposerSettingsPayload {
+	if db != nil && db.DefaultConfig != nil {
+		merged.DefaultConfig = db.DefaultConfig
+	}
+	if loaded != nil && loaded.DefaultConfig != nil {
+		merged.DefaultConfig = loaded.DefaultConfig
+	}
+	merged.ProposerConfig = selectProposerConfig(db, loaded)
+
+	// --enable-builder is legacy content: it still forces the default mev-boost
+	// toggle on for pre-gloas registrations, and is inert from the fork onward.
+	if builderConfig != nil {
+		if merged.DefaultConfig == nil {
+			merged.DefaultConfig = &validatorpb.ProposerOptionPayload{}
+		}
+		if merged.DefaultConfig.Builder == nil {
+			merged.DefaultConfig.Builder = &validatorpb.BuilderConfig{}
+		}
+		merged.DefaultConfig.Builder.Enabled = true
+		log.Warnf("--%s is legacy (pre-gloas) mev-boost content and has no effect after the gloas fork; configure builders via the settings source or keymanager API", flags.EnableBuilderFlag.Name)
+	}
+
+	// --suggested-gas-limit is likewise legacy content: it applies to the
+	// pre-gloas builder gas limit and never overrides v2 or schedule values.
+	if gasLimitOnly != nil {
+		if merged.DefaultConfig == nil {
+			merged.DefaultConfig = &validatorpb.ProposerOptionPayload{}
+		}
+		if merged.DefaultConfig.Builder == nil {
+			merged.DefaultConfig.Builder = &validatorpb.BuilderConfig{}
+		}
+		merged.DefaultConfig.Builder.GasLimit = *gasLimitOnly
+		log.Warnf("--%s is legacy (pre-gloas) content and has no effect after the gloas fork; set gas limits in v2 proposer settings or via the keymanager API", flags.BuilderGasLimitFlag.Name)
+	}
+	return merged
+}
+
+func processBuilderConfig(current *validatorpb.BuilderConfig, override *validatorpb.BuilderConfig, gasLimitOnly *validator.Uint64) *validatorpb.BuilderConfig {
+	if current != nil {
+		current.GasLimit = reviewGasLimit(current.GasLimit)
+		if override != nil {
+			current.Enabled = override.Enabled
+		}
+		if gasLimitOnly != nil {
+			current.GasLimit = *gasLimitOnly
+		}
+		return current
+	}
+	if override != nil {
+		return override
+	}
+	if gasLimitOnly != nil {
+		return &validatorpb.BuilderConfig{GasLimit: *gasLimitOnly}
+	}
+	return nil
+}
+
+func reviewGasLimit(gasLimit validator.Uint64) validator.Uint64 {
+	// sets gas limit to default if not defined or set to 0
+	if gasLimit == 0 {
+		return validator.Uint64(params.BeaconConfig().DefaultBuilderGasLimit)
+	}
+
+	// Warning for ranges that might be problematic
+	defaultGasLimit := params.BeaconConfig().DefaultBuilderGasLimit
+	// If gas limit is very low (below 10% of default), warn about potential issues
+	if gasLimit <= validator.Uint64(defaultGasLimit/10) {
+		log.Warnf("Gas limit %d is very low compared to default %d, which may cause transactions to fail", gasLimit, defaultGasLimit)
+	}
+	// If gas limit is very high (above 150% of default), warn about potential block propagation issues
+	if gasLimit > validator.Uint64(defaultGasLimit*3/2) {
+		log.Warnf("Gas limit %d is very high compared to default %d", gasLimit, defaultGasLimit)
+	}
+
+	return gasLimit
+}

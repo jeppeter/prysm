@@ -1,0 +1,467 @@
+/*
+Package features defines which features are enabled for runtime
+in order to selectively enable certain features to maintain a stable runtime.
+
+The process for implementing new features using this package is as follows:
+ 1. Add a new CMD flag in flags.go, and place it in the proper list(s) var for its client.
+ 2. Add a condition for the flag in the proper Configure function(s) below.
+ 3. Place any "new" behavior in the `if flagEnabled` statement.
+ 4. Place any "previous" behavior in the `else` statement.
+ 5. Ensure any tests using the new feature fail if the flag isn't enabled.
+    5a. Use the following to enable your flag for tests:
+    cfg := &featureconfig.Flags{
+    VerifyAttestationSigs: true,
+    }
+    resetCfg := featureconfig.InitWithReset(cfg)
+    defer resetCfg()
+ 6. Add the string for the flags that should be running within E2E to E2EValidatorFlags
+    and E2EBeaconChainFlags.
+*/
+package features
+
+import (
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/OffchainLabs/prysm/v7/cmd"
+	validatorflags "github.com/OffchainLabs/prysm/v7/cmd/validator/flags"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	"github.com/OffchainLabs/prysm/v7/runtime/version"
+	"github.com/urfave/cli/v2"
+)
+
+const enabledFeatureFlag = "Enabled feature flag"
+const disabledFeatureFlag = "Disabled feature flag"
+
+// Flags is a struct to represent which features the client will perform on runtime.
+type Flags struct {
+	// Feature related flags.
+	EnablePeerScorer                    bool // EnablePeerScorer enables experimental peer scoring in p2p.
+	EnableLightClient                   bool // EnableLightClient enables light client APIs.
+	EnableQUIC                          bool // EnableQUIC specifies whether to enable QUIC transport for libp2p.
+	WriteWalletPasswordOnWebOnboarding  bool // WriteWalletPasswordOnWebOnboarding writes the password to disk after Prysm web signup.
+	EnableDoppelGanger                  bool // EnableDoppelGanger enables doppelganger protection on startup for the validator.
+	EnableHistoricalSpaceRepresentation bool // EnableHistoricalSpaceRepresentation enables the saving of registry validators in separate buckets to save space
+	EnableBeaconRESTApi                 bool // EnableBeaconRESTApi enables experimental usage of the beacon REST API by the validator when querying a beacon node
+	EnableExperimentalAttestationPool   bool // EnableExperimentalAttestationPool enables an experimental attestation pool design.
+	DisableDutiesV2                     bool // DisableDutiesV2 sets validator client to use the get Duties endpoint
+	EnableWeb                           bool // EnableWeb enables the webui on the validator client
+	EnableStateDiff                     bool // EnableStateDiff enables the experimental state diff feature for the beacon node.
+	DisableProgressiveSSZ               bool // DisableProgressiveSSZ turns off progressive SSZ merkleization for Gloas consensus types.
+	ReorgLatePayloads                   bool // ReorgLatePayloads enables reorging late payloads in the beacon node.
+	SubmitBlacklistedBuilderBids        bool // SubmitBlacklistedBuilderBids skips the circuit breaker check when submitting a signed execution payload bid.
+
+	// Logging related toggles.
+	DisableGRPCConnectionLogs bool // Disables logging when a new grpc client has connected.
+	EnableFullSSZDataLogging  bool // Enables logging for full ssz data on rejected gossip messages
+
+	// Slasher toggles.
+	DisableBroadcastSlashings bool // DisableBroadcastSlashings disables p2p broadcasting of proposer and attester slashings.
+
+	// Bug fixes related flags.
+	AttestTimely bool // AttestTimely fixes #8185. It is gated behind a flag to ensure beacon node's fix can safely roll out first. We'll invert this in v1.1.0.
+
+	EnableSlashingProtectionPruning bool // Enable slashing protection pruning for the validator client.
+	EnableMinimalSlashingProtection bool // Enable minimal slashing protection database for the validator client.
+
+	SaveFullExecutionPayloads bool // Save full beacon blocks with execution payloads in the database.
+	EnableStartOptimistic     bool // EnableStartOptimistic treats every block as optimistic at startup.
+
+	DisableResourceManager     bool // Disables running the node with libp2p's resource manager.
+	DisableStakinContractCheck bool // Disables check for deposit contract when proposing blocks
+	IgnoreUnviableAttestations bool // Ignore attestations whose target state is not viable (avoids lagging-node DoS).
+	TrackEquivocations         bool // Record proposer equivocations seen on gossip into forkchoice.
+
+	EnableHashtree               bool // Enables usage of the hashtree library for hashing
+	EnableVerboseSigVerification bool // EnableVerboseSigVerification specifies whether to verify individual signature if batch verification fails
+	EnableProposerPreprocessing  bool // EnableProposerPreprocessing enables proposer pre-processing of blocks before proposing.
+
+	PrepareAllPayloads bool // PrepareAllPayloads informs the engine to prepare a block on every slot.
+	// BlobSaveFsync requires blob saving to block on fsync to ensure blobs are durably persisted before passing DA.
+	BlobSaveFsync bool
+
+	SaveInvalidBlock bool // SaveInvalidBlock saves invalid block to temp.
+	SaveInvalidBlob  bool // SaveInvalidBlob saves invalid blob to temp.
+
+	EnableDiscoveryReboot bool // EnableDiscoveryReboot allows the node to have its local listener to be rebooted in the event of discovery issues.
+
+	// KeystoreImportDebounceInterval specifies the time duration the validator waits to reload new keys if they have
+	// changed on disk. This feature is for advanced use cases only.
+	KeystoreImportDebounceInterval time.Duration
+
+	// AggregateIntervals specifies the time durations at which we aggregate attestations preparing for forkchoice.
+	AggregateIntervals [3]time.Duration
+
+	// Feature related flags (alignment forced in the end)
+	ForceHead        string                // ForceHead forces the head block to be a specific block root, the last head block, or the last finalized block.
+	BlacklistedRoots map[[32]byte]struct{} // BlacklistedRoots is a list of roots that are blacklisted from processing.
+}
+
+// Read on hot paths, so kept lock-free: an RWMutex read lock does not scale.
+var featureConfig atomic.Pointer[Flags]
+
+// Get retrieves feature config.
+func Get() *Flags {
+	if c := featureConfig.Load(); c != nil {
+		return c
+	}
+	return &Flags{}
+}
+
+// ProgressiveSSZEnabled reports whether progressive SSZ is enabled for the
+// supplied state version.
+func ProgressiveSSZEnabled(stateVersion int) bool {
+	return stateVersion >= version.Gloas && !Get().DisableProgressiveSSZ
+}
+
+// Init sets the global config equal to the config that is passed in.
+func Init(c *Flags) {
+	featureConfig.Store(c)
+}
+
+// InitWithReset sets the global config and returns function that is used to reset configuration.
+func InitWithReset(c *Flags) func() {
+	var prevConfig Flags
+	if p := featureConfig.Load(); p != nil {
+		prevConfig = *p
+	}
+	resetFunc := func() {
+		Init(&prevConfig)
+	}
+	Init(c)
+	return resetFunc
+}
+
+// configureTestnet sets the config according to specified testnet flag
+func configureTestnet(ctx *cli.Context) error {
+	if ctx.Bool(SepoliaTestnet.Name) {
+		log.Info("Running on the Sepolia Beacon Chain Testnet")
+		if err := params.SetActive(params.SepoliaConfig().Copy()); err != nil {
+			return err
+		}
+		applySepoliaFeatureFlags(ctx)
+		params.UseSepoliaNetworkConfig()
+	} else if ctx.Bool(HoleskyTestnet.Name) {
+		log.Info("Running on the Holesky Beacon Chain Testnet")
+		if err := params.SetActive(params.HoleskyConfig().Copy()); err != nil {
+			return err
+		}
+		applyHoleskyFeatureFlags(ctx)
+		params.UseHoleskyNetworkConfig()
+	} else if ctx.Bool(HoodiTestnet.Name) {
+		log.Info("Running on the Hoodi Beacon Chain Testnet")
+		if err := params.SetActive(params.HoodiConfig().Copy()); err != nil {
+			return err
+		}
+		params.UseHoodiNetworkConfig()
+	} else {
+		if ctx.IsSet(cmd.ChainConfigFileFlag.Name) {
+			log.Warning("Running on custom Ethereum network specified in a chain configuration YAML file")
+			params.UseCustomNetworkConfig()
+		} else {
+			log.Info("Running on Ethereum Mainnet")
+		}
+		if err := params.SetActive(params.MainnetConfig()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Insert feature flags within the function to be enabled for Sepolia testnet.
+func applySepoliaFeatureFlags(_ *cli.Context) {
+}
+
+// Insert feature flags within the function to be enabled for Holesky testnet.
+func applyHoleskyFeatureFlags(_ *cli.Context) {
+}
+
+// ConfigureBeaconChain sets the global config based
+// on what flags are enabled for the beacon-chain client.
+func ConfigureBeaconChain(ctx *cli.Context) error {
+	warnDeprecationUpcoming(ctx)
+	complainOnDeprecatedFlags(ctx)
+	cfg := &Flags{}
+	if ctx.Bool(devModeFlag.Name) {
+		enableDevModeFlags(ctx)
+	}
+	if err := configureTestnet(ctx); err != nil {
+		return err
+	}
+
+	if ctx.Bool(saveInvalidBlockTempFlag.Name) {
+		logEnabled(saveInvalidBlockTempFlag)
+		cfg.SaveInvalidBlock = true
+	}
+
+	if ctx.Bool(saveInvalidBlobTempFlag.Name) {
+		logEnabled(saveInvalidBlobTempFlag)
+		cfg.SaveInvalidBlob = true
+	}
+
+	if ctx.IsSet(disableGRPCConnectionLogging.Name) {
+		logDisabled(disableGRPCConnectionLogging)
+		cfg.DisableGRPCConnectionLogs = true
+	}
+
+	cfg.EnablePeerScorer = true
+	if ctx.Bool(disablePeerScorer.Name) {
+		logDisabled(disablePeerScorer)
+		cfg.EnablePeerScorer = false
+	}
+	if ctx.Bool(disableBroadcastSlashingFlag.Name) {
+		logDisabled(disableBroadcastSlashingFlag)
+		cfg.DisableBroadcastSlashings = true
+	}
+	if ctx.Bool(enableHistoricalSpaceRepresentation.Name) {
+		log.WithField(enableHistoricalSpaceRepresentation.Name, enableHistoricalSpaceRepresentation.Usage).Warn(enabledFeatureFlag)
+		cfg.EnableHistoricalSpaceRepresentation = true
+	}
+	if ctx.Bool(disableStakinContractCheck.Name) {
+		logEnabled(disableStakinContractCheck)
+		cfg.DisableStakinContractCheck = true
+	}
+	if ctx.Bool(SaveFullExecutionPayloads.Name) {
+		logEnabled(SaveFullExecutionPayloads)
+		cfg.SaveFullExecutionPayloads = true
+	}
+	if ctx.Bool(enableStartupOptimistic.Name) {
+		logEnabled(enableStartupOptimistic)
+		cfg.EnableStartOptimistic = true
+	}
+	if ctx.IsSet(enableFullSSZDataLogging.Name) {
+		logEnabled(enableFullSSZDataLogging)
+		cfg.EnableFullSSZDataLogging = true
+	}
+	if ctx.IsSet(enableHashtree.Name) {
+		logEnabled(enableHashtree)
+		cfg.EnableHashtree = true
+	}
+	cfg.EnableVerboseSigVerification = true
+	if ctx.IsSet(disableVerboseSigVerification.Name) {
+		logEnabled(disableVerboseSigVerification)
+		cfg.EnableVerboseSigVerification = false
+	}
+	cfg.EnableProposerPreprocessing = ctx.Bool(enableProposerPreprocessing.Name)
+	if cfg.EnableProposerPreprocessing {
+		logEnabled(enableProposerPreprocessing)
+	}
+	if ctx.IsSet(prepareAllPayloads.Name) {
+		logEnabled(prepareAllPayloads)
+		cfg.PrepareAllPayloads = true
+	}
+	if ctx.IsSet(disableResourceManager.Name) {
+		logEnabled(disableResourceManager)
+		cfg.DisableResourceManager = true
+	}
+	if ctx.IsSet(EnableLightClient.Name) {
+		logEnabled(EnableLightClient)
+		cfg.EnableLightClient = true
+	}
+	if ctx.IsSet(BlobSaveFsync.Name) {
+		logEnabled(BlobSaveFsync)
+		cfg.BlobSaveFsync = true
+	}
+	cfg.EnableQUIC = true
+	if ctx.IsSet(DisableQUIC.Name) {
+		logDisabled(DisableQUIC)
+		cfg.EnableQUIC = false
+	}
+	if ctx.IsSet(EnableDiscoveryReboot.Name) {
+		logEnabled(EnableDiscoveryReboot)
+		cfg.EnableDiscoveryReboot = true
+	}
+	if ctx.IsSet(enableExperimentalAttestationPool.Name) {
+		logEnabled(enableExperimentalAttestationPool)
+		cfg.EnableExperimentalAttestationPool = true
+	}
+	if ctx.IsSet(forceHeadFlag.Name) {
+		logEnabled(forceHeadFlag)
+		cfg.ForceHead = ctx.String(forceHeadFlag.Name)
+	}
+	if ctx.IsSet(blacklistRoots.Name) {
+		logEnabled(blacklistRoots)
+		cfg.BlacklistedRoots = parseBlacklistedRoots(ctx.StringSlice(blacklistRoots.Name))
+	}
+
+	cfg.IgnoreUnviableAttestations = false
+	if ctx.IsSet(ignoreUnviableAttestations.Name) && ctx.Bool(ignoreUnviableAttestations.Name) {
+		logEnabled(ignoreUnviableAttestations)
+		cfg.IgnoreUnviableAttestations = true
+	}
+	cfg.TrackEquivocations = false
+	if ctx.IsSet(trackEquivocations.Name) && ctx.Bool(trackEquivocations.Name) {
+		logEnabled(trackEquivocations)
+		cfg.TrackEquivocations = true
+	}
+	if ctx.IsSet(EnableStateDiff.Name) {
+		logEnabled(EnableStateDiff)
+		cfg.EnableStateDiff = true
+
+		if ctx.IsSet(enableHistoricalSpaceRepresentation.Name) {
+			log.Warn("--enable-state-diff is enabled, ignoring --enable-historical-space-representation flag.")
+			cfg.EnableHistoricalSpaceRepresentation = false
+		}
+	}
+	if ctx.IsSet(DisableProgressiveSSZ.Name) {
+		logDisabled(DisableProgressiveSSZ)
+		cfg.DisableProgressiveSSZ = true
+	}
+	if ctx.Bool(reorgLatePayloads.Name) {
+		logEnabled(reorgLatePayloads)
+		cfg.ReorgLatePayloads = true
+	}
+	if ctx.Bool(submitBlacklistedBuilderBids.Name) {
+		logEnabled(submitBlacklistedBuilderBids)
+		cfg.SubmitBlacklistedBuilderBids = true
+	}
+
+	cfg.AggregateIntervals = [3]time.Duration{aggregateFirstInterval.Value, aggregateSecondInterval.Value, aggregateThirdInterval.Value}
+	Init(cfg)
+	return nil
+}
+
+func parseBlacklistedRoots(blacklistedRoots []string) map[[32]byte]struct{} {
+	roots := make(map[[32]byte]struct{})
+	for _, root := range blacklistedRoots {
+		r, err := bytesutil.DecodeHexWithLength(root, 32)
+		if err != nil {
+			log.WithError(err).WithField("root", root).Warn("Failed to parse blacklisted root")
+			continue
+		}
+		roots[[32]byte(r)] = struct{}{}
+	}
+	return roots
+}
+
+// ConfigureValidator sets the global config based
+// on what flags are enabled for the validator client.
+func ConfigureValidator(ctx *cli.Context) error {
+	complainOnDeprecatedFlags(ctx)
+	cfg := &Flags{}
+	if err := configureTestnet(ctx); err != nil {
+		return err
+	}
+	if ctx.Bool(writeWalletPasswordOnWebOnboarding.Name) {
+		logEnabled(writeWalletPasswordOnWebOnboarding)
+		cfg.WriteWalletPasswordOnWebOnboarding = true
+	}
+	cfg.AttestTimely = true
+	if ctx.Bool(disableAttestTimely.Name) {
+		logEnabled(disableAttestTimely)
+		cfg.AttestTimely = false
+	}
+	if ctx.Bool(enableSlashingProtectionPruning.Name) {
+		logEnabled(enableSlashingProtectionPruning)
+		cfg.EnableSlashingProtectionPruning = true
+	}
+	if ctx.Bool(EnableMinimalSlashingProtection.Name) {
+		logEnabled(EnableMinimalSlashingProtection)
+		cfg.EnableMinimalSlashingProtection = true
+	}
+	if ctx.Bool(enableDoppelGangerProtection.Name) {
+		logEnabled(enableDoppelGangerProtection)
+		cfg.EnableDoppelGanger = true
+	}
+	if ctx.Bool(EnableBeaconRESTApi.Name) || ctx.IsSet(validatorflags.BeaconRESTApiProviderFlag.Name) {
+		logEnabled(EnableBeaconRESTApi)
+		cfg.EnableBeaconRESTApi = true
+	}
+	if ctx.Bool(DisableDutiesV2.Name) {
+		logEnabled(DisableDutiesV2)
+		cfg.DisableDutiesV2 = true
+	}
+	if ctx.Bool(EnableWebFlag.Name) {
+		logEnabled(EnableWebFlag)
+		cfg.EnableWeb = true
+	}
+
+	cfg.KeystoreImportDebounceInterval = ctx.Duration(dynamicKeyReloadDebounceInterval.Name)
+	Init(cfg)
+	return nil
+}
+
+// enableDevModeFlags switches development mode features on.
+func enableDevModeFlags(ctx *cli.Context) {
+	log.Warn("Enabling development mode flags")
+	for _, f := range devModeFlags {
+		log.WithField("flag", f.Names()[0]).Debug("Enabling development mode flag")
+		if !ctx.IsSet(f.Names()[0]) {
+			if err := ctx.Set(f.Names()[0], "true"); err != nil {
+				log.WithError(err).Debug("Error enabling development mode flag")
+			}
+		}
+	}
+}
+
+func complainOnDeprecatedFlags(ctx *cli.Context) {
+	for _, f := range deprecatedFlags {
+		if ctx.IsSet(f.Names()[0]) {
+			log.Errorf("%s is deprecated and has no effect. Do not use this flag, it will be deleted soon.", f.Names()[0])
+		}
+	}
+}
+
+var upcomingDeprecationExtra = map[string]string{
+	enableHistoricalSpaceRepresentation.Name: "The node needs to be resynced after flag removal.",
+}
+
+func warnDeprecationUpcoming(ctx *cli.Context) {
+	for _, f := range upcomingDeprecation {
+		if ctx.IsSet(f.Names()[0]) {
+			extra := "Please remove this flag from your configuration."
+			if special, ok := upcomingDeprecationExtra[f.Names()[0]]; ok {
+				extra += " " + special
+			}
+			log.Warnf("--%s is pending deprecation and will be removed in the next release. %s", f.Names()[0], extra)
+		}
+	}
+}
+
+func logEnabled(flag cli.DocGenerationFlag) {
+	var name string
+	if names := flag.Names(); len(names) > 0 {
+		name = names[0]
+	}
+	log.WithField(name, flag.GetUsage()).Warn(enabledFeatureFlag)
+}
+
+func logDisabled(flag cli.DocGenerationFlag) {
+	var name string
+	if names := flag.Names(); len(names) > 0 {
+		name = names[0]
+	}
+	log.WithField(name, flag.GetUsage()).Warn(disabledFeatureFlag)
+}
+
+// ValidateNetworkFlags validates provided flags and
+// prevents beacon node or validator to start
+// if more than one network flag is provided
+func ValidateNetworkFlags(ctx *cli.Context) error {
+	networkFlagsCount := 0
+	for _, flag := range NetworkFlags {
+		if ctx.IsSet(flag.Names()[0]) {
+			networkFlagsCount++
+			if networkFlagsCount > 1 {
+				// using a forLoop so future addition
+				// doesn't require changes in this function
+				var flagNames []string
+				for _, flag := range NetworkFlags {
+					flagNames = append(flagNames, "--"+flag.Names()[0])
+				}
+				return fmt.Errorf("cannot use more than one network flag at the same time. Possible network flags are: %s", strings.Join(flagNames, ", "))
+			}
+		}
+	}
+	return nil
+}
+
+// BlacklistedBlock returns weather the given block root belongs to the list of blacklisted roots.
+func BlacklistedBlock(r [32]byte) bool {
+	blacklisted := Get().BlacklistedRoots
+	_, ok := blacklisted[r]
+	return ok
+}

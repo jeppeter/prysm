@@ -1,0 +1,109 @@
+package verification
+
+import (
+	"testing"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/signing"
+
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/crypto/bls"
+	eth "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/OffchainLabs/prysm/v7/runtime/interop"
+	"github.com/OffchainLabs/prysm/v7/testing/require"
+	"github.com/OffchainLabs/prysm/v7/testing/util"
+)
+
+func testSignedBlockBlobKeys(t *testing.T, valRoot []byte, slot primitives.Slot, nblobs int) (blocks.ROBlock, []blocks.ROBlob, bls.SecretKey, bls.PublicKey) {
+	sks, pks, err := interop.DeterministicallyGenerateKeys(0, 1)
+	require.NoError(t, err)
+	block, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, slot, nblobs, util.WithProposerSigning(0, sks[0], valRoot))
+	return block, blobs, sks[0], pks[0]
+}
+
+func TestSignatureDataString(t *testing.T) {
+	const expected = "\x01\x02\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+	sigData := signatureData{
+		Root:      [32]byte{1, 2, 3},
+		Signature: [96]byte{4, 5, 6},
+	}
+
+	actual := sigData.concat()
+	require.Equal(t, expected, actual)
+}
+
+func TestVerifySignature(t *testing.T) {
+	valRoot := [32]byte{}
+	_, blobs, _, pk := testSignedBlockBlobKeys(t, valRoot[:], 0, 1)
+	b := blobs[0]
+
+	sc := newSigCache(valRoot[:], 1, nil)
+	cb := func(idx primitives.ValidatorIndex) (*eth.Validator, error) {
+		return &eth.Validator{PublicKey: pk.Marshal()}, nil
+	}
+	mv := &mockValidatorAtIndexer{cb: cb}
+
+	sd := blobToSignatureData(b)
+	require.NoError(t, sc.VerifySignature(sd, mv))
+}
+
+func TestSignatureCacheMissThenHit(t *testing.T) {
+	valRoot := [32]byte{}
+	_, blobs, _, pk := testSignedBlockBlobKeys(t, valRoot[:], 0, 1)
+	b := blobs[0]
+
+	sc := newSigCache(valRoot[:], 1, nil)
+	cb := func(idx primitives.ValidatorIndex) (*eth.Validator, error) {
+		return &eth.Validator{PublicKey: pk.Marshal()}, nil
+	}
+
+	sd := blobToSignatureData(b)
+	cached, err := sc.SignatureVerified(sd)
+	// Should not be cached yet.
+	require.Equal(t, false, cached)
+	require.NoError(t, err)
+
+	mv := &mockValidatorAtIndexer{cb: cb}
+	require.NoError(t, sc.VerifySignature(sd, mv))
+
+	// Now it should be cached.
+	cached, err = sc.SignatureVerified(sd)
+	require.Equal(t, true, cached)
+	require.NoError(t, err)
+
+	// note the changed slot, which will give this blob a different cache key
+	_, blobs, _, _ = testSignedBlockBlobKeys(t, valRoot[:], 1, 1)
+	badSd := blobToSignatureData(blobs[0])
+
+	// new value, should not be cached
+	cached, err = sc.SignatureVerified(badSd)
+	require.Equal(t, false, cached)
+	require.NoError(t, err)
+
+	// note that the first argument is incremented, so it will be a different deterministic key
+	_, pks, err := interop.DeterministicallyGenerateKeys(1, 1)
+	require.NoError(t, err)
+	wrongKey := pks[0]
+	cb = func(idx primitives.ValidatorIndex) (*eth.Validator, error) {
+		return &eth.Validator{PublicKey: wrongKey.Marshal()}, nil
+	}
+	mv = &mockValidatorAtIndexer{cb: cb}
+	require.ErrorIs(t, sc.VerifySignature(badSd, mv), signing.ErrSigFailedToVerify)
+
+	// we should now get the failure error from the cache
+	cached, err = sc.SignatureVerified(badSd)
+	require.Equal(t, true, cached)
+	require.ErrorIs(t, err, signing.ErrSigFailedToVerify)
+}
+
+type mockValidatorAtIndexer struct {
+	cb func(idx primitives.ValidatorIndex) (*eth.Validator, error)
+}
+
+// ValidatorAtIndex implements validatorAtIndexer.
+func (m *mockValidatorAtIndexer) ValidatorAtIndex(idx primitives.ValidatorIndex) (*eth.Validator, error) {
+	return m.cb(idx)
+}
+
+var _ validatorAtIndexer = &mockValidatorAtIndexer{}

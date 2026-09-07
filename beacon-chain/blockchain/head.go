@@ -1,0 +1,557 @@
+package blockchain
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+
+	"github.com/OffchainLabs/prysm/v7/api"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/feed"
+	statefeed "github.com/OffchainLabs/prysm/v7/beacon-chain/core/feed/state"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/forkchoice"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	"github.com/OffchainLabs/prysm/v7/config/features"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/interfaces"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	"github.com/OffchainLabs/prysm/v7/monitoring/tracing/trace"
+	"github.com/OffchainLabs/prysm/v7/runtime/version"
+	"github.com/OffchainLabs/prysm/v7/time/slots"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+)
+
+// UpdateAndSaveHeadWithBalances updates the beacon state head after getting justified balanced from cache.
+// This function is only used in spec-tests, it does save the head after updating it.
+func (s *Service) UpdateAndSaveHeadWithBalances(ctx context.Context) error {
+	s.cfg.ForkChoiceStore.Lock()
+	defer s.cfg.ForkChoiceStore.Unlock()
+	headRoot, err := s.cfg.ForkChoiceStore.Head(ctx)
+	if err != nil {
+		return errors.Wrap(err, "could not update head")
+	}
+	headBlock, err := s.getBlock(ctx, headRoot)
+	if err != nil {
+		return err
+	}
+	headState, err := s.cfg.StateGen.StateByRoot(ctx, headRoot)
+	if err != nil {
+		return errors.Wrap(err, "could not retrieve head state in DB")
+	}
+	full := s.cfg.ForkChoiceStore.FullBeatsEmpty(headRoot)
+	return s.saveHead(ctx, headRoot, headBlock, headState, full)
+}
+
+// This defines the current chain service's view of head.
+type head struct {
+	root       [32]byte                             // current head root.
+	block      interfaces.ReadOnlySignedBeaconBlock // current head block.
+	state      state.BeaconState                    // current head state.
+	slot       primitives.Slot                      // the head block slot number
+	full       bool                                 // whether the head's execution payload has been delivered (post-Gloas)
+	optimistic bool                                 // optimistic status when saved head
+}
+
+// This saves head info to the local service cache, it also saves the
+// new head root to the DB.
+// Caller of the method MUST acquire a lock on forkchoice.
+func (s *Service) saveHead(ctx context.Context, newHeadRoot [32]byte, headBlock interfaces.ReadOnlySignedBeaconBlock, headState state.BeaconState, full bool) error {
+	ctx, span := trace.StartSpan(ctx, "blockChain.saveHead")
+	defer span.End()
+
+	if !s.isNewHead(newHeadRoot, full) {
+		return nil
+	}
+
+	if err := blocks.BeaconBlockIsNil(headBlock); err != nil {
+		return err
+	}
+	if headState == nil || headState.IsNil() {
+		return errors.New("cannot save nil head state")
+	}
+
+	// If the head state is not available, just return nil.
+	// There's nothing to cache
+	if !s.cfg.BeaconDB.HasStateSummary(ctx, newHeadRoot) {
+		return nil
+	}
+
+	s.headLock.RLock()
+	oldHeadBlock, err := s.headBlock()
+	if err != nil {
+		s.headLock.RUnlock()
+		return errors.Wrap(err, "could not get old head block")
+	}
+	oldStateRoot := oldHeadBlock.Block().StateRoot()
+	s.headLock.RUnlock()
+	headSlot := s.HeadSlot()
+	newHeadSlot := headBlock.Block().Slot()
+	newStateRoot := headBlock.Block().StateRoot()
+
+	r, err := s.HeadRoot(ctx)
+	if err != nil {
+		return errors.Wrap(err, "could not get old head root")
+	}
+	oldHeadRoot := bytesutil.ToBytes32(r)
+	isOptimistic, err := s.cfg.ForkChoiceStore.IsOptimistic(newHeadRoot)
+	if err != nil {
+		log.WithError(err).Error("Could not check if node is optimistically synced")
+	}
+	if headBlock.Block().ParentRoot() != oldHeadRoot {
+		// A chain re-org occurred, so we fire an event notifying the rest of the services.
+		commonRoot, forkSlot, err := s.cfg.ForkChoiceStore.CommonAncestor(ctx, oldHeadRoot, newHeadRoot)
+		if err != nil {
+			log.WithError(err).Error("Could not find common ancestor root")
+			commonRoot = params.BeaconConfig().ZeroHash
+		}
+		dis := headSlot + newHeadSlot - 2*forkSlot
+		dep := max(uint64(headSlot-forkSlot), uint64(newHeadSlot-forkSlot))
+		oldWeight, err := s.cfg.ForkChoiceStore.Weight(oldHeadRoot)
+		if err != nil {
+			log.WithField("root", fmt.Sprintf("%#x", oldHeadRoot)).Warn("Could not determine node weight")
+		}
+		newWeight, err := s.cfg.ForkChoiceStore.Weight(newHeadRoot)
+		if err != nil {
+			log.WithField("root", fmt.Sprintf("%#x", newHeadRoot)).Warn("Could not determine node weight")
+		}
+		log.WithFields(logrus.Fields{
+			"newSlot":            fmt.Sprintf("%d", newHeadSlot),
+			"newRoot":            fmt.Sprintf("%#x", newHeadRoot),
+			"newWeight":          newWeight,
+			"oldSlot":            fmt.Sprintf("%d", headSlot),
+			"oldRoot":            fmt.Sprintf("%#x", oldHeadRoot),
+			"oldWeight":          oldWeight,
+			"commonAncestorRoot": fmt.Sprintf("%#x", commonRoot),
+			"distance":           dis,
+			"depth":              dep,
+		}).Info("Chain reorg occurred")
+		reorgDistance.Observe(float64(dis))
+		reorgDepth.Observe(float64(dep))
+
+		s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
+			Type: statefeed.Reorg,
+			Data: &statefeed.ChainReorgData{
+				Slot:                newHeadSlot,
+				Depth:               max(uint64(headSlot-forkSlot), uint64(newHeadSlot-forkSlot)),
+				OldHeadBlock:        oldHeadRoot,
+				NewHeadBlock:        newHeadRoot,
+				OldHeadState:        oldStateRoot,
+				NewHeadState:        newStateRoot,
+				Epoch:               slots.ToEpoch(newHeadSlot),
+				ExecutionOptimistic: isOptimistic,
+			},
+		})
+
+		if err := s.saveOrphanedOperations(ctx, oldHeadRoot, newHeadRoot); err != nil {
+			return err
+		}
+		reorgCount.Inc()
+	}
+
+	// Cache the new head info.
+	newHead := &head{
+		root:       newHeadRoot,
+		block:      headBlock,
+		state:      headState,
+		optimistic: isOptimistic,
+		slot:       headBlock.Block().Slot(),
+		full:       full,
+	}
+	if err := s.setHead(newHead); err != nil {
+		return errors.Wrap(err, "could not set head")
+	}
+
+	// Save the new head root to DB.
+	if err := s.cfg.BeaconDB.SaveHeadBlockRoot(ctx, newHeadRoot); err != nil {
+		return errors.Wrap(err, "could not save head root in DB")
+	}
+
+	// Forward an event capturing a new chain head over a common event feed
+	// done in a goroutine to avoid blocking the critical runtime main routine.
+	go func() {
+		if err := s.notifyNewHeadEvent(s.ctx, newHeadSlot, newStateRoot, newHeadRoot); err != nil {
+			log.WithError(err).Error("Could not notify event feed of new chain head")
+		}
+
+	}()
+	go func() {
+		if err := s.notifyNewHeadV2Event(s.ctx, newHeadSlot, newStateRoot, newHeadRoot, headBlock.Version(), full); err != nil {
+			log.WithError(err).Error("Could not notify event feed of new chain head_v2")
+		}
+	}()
+
+	return nil
+}
+
+// This gets called to update canonical root mapping. It does not save head block
+// root in DB. With the inception of initial-sync-cache-state flag, it uses finalized
+// check point as anchors to resume sync therefore head is no longer needed to be saved on per slot basis.
+func (s *Service) saveHeadNoDB(ctx context.Context, b interfaces.ReadOnlySignedBeaconBlock, r [32]byte, hs state.BeaconState, optimistic bool) error {
+	if err := blocks.BeaconBlockIsNil(b); err != nil {
+		return err
+	}
+	cachedHeadRoot, err := s.HeadRoot(ctx)
+	if err != nil {
+		return errors.Wrap(err, "could not get head root from cache")
+	}
+	if bytes.Equal(r[:], cachedHeadRoot) {
+		return nil
+	}
+
+	bCp, err := b.Copy()
+	if err != nil {
+		return err
+	}
+	if err := s.setHeadInitialSync(r, bCp, hs, optimistic); err != nil {
+		return errors.Wrap(err, "could not set head")
+	}
+	if b.Version() >= version.Gloas {
+		sbid, err := b.Block().Body().SignedExecutionPayloadBid()
+		if err != nil || sbid == nil || sbid.Message == nil || len(sbid.Message.ParentBlockHash) != 32 {
+			log.WithError(err).Error("Could not get bid parent block hash for forkchoice update")
+			return nil
+		}
+		parentHash := bytesutil.ToBytes32(sbid.Message.ParentBlockHash)
+		go func() {
+			if _, err := s.notifyForkchoiceUpdateGloas(s.ctx, parentHash, nil); err != nil {
+				log.WithError(err).Error("Could not notify forkchoice update after batch import")
+			}
+		}()
+	}
+	return nil
+}
+
+// This sets head view object which is used to track the head slot, root, block, state and optimistic status
+func (s *Service) setHead(newHead *head) error {
+	s.headLock.Lock()
+	defer s.headLock.Unlock()
+
+	// This does a full copy of the block and state.
+	bCp, err := newHead.block.Copy()
+	if err != nil {
+		return err
+	}
+	s.head = &head{
+		root:       newHead.root,
+		block:      bCp,
+		state:      newHead.state.Copy(),
+		optimistic: newHead.optimistic,
+		slot:       newHead.slot,
+		full:       newHead.full,
+	}
+	return nil
+}
+
+// This sets head view object which is used to track the head slot, root, block and state. The method
+// assumes that state being passed into the method will not be modified by any other alternate
+// caller which holds the state's reference.
+func (s *Service) setHeadInitialSync(root [32]byte, block interfaces.ReadOnlySignedBeaconBlock, state state.BeaconState, optimistic bool) error {
+	s.headLock.Lock()
+	defer s.headLock.Unlock()
+
+	// This does a full copy of the block only.
+	bCp, err := block.Copy()
+	if err != nil {
+		return err
+	}
+	s.head = &head{
+		root:       root,
+		block:      bCp,
+		state:      state,
+		optimistic: optimistic,
+	}
+	return nil
+}
+
+// This returns the head slot.
+// This is a lock free version.
+func (s *Service) headSlot() primitives.Slot {
+	if s.head == nil || s.head.block == nil || s.head.block.Block() == nil {
+		return 0
+	}
+	return s.head.block.Block().Slot()
+}
+
+// This returns the head root.
+// It does a full copy on head root for immutability.
+// This is a lock free version.
+func (s *Service) headRoot() [32]byte {
+	if s.head == nil {
+		return params.BeaconConfig().ZeroHash
+	}
+
+	return s.head.root
+}
+
+// This returns the head block.
+// It does a full copy on head block for immutability.
+// This is a lock free version.
+func (s *Service) headBlock() (interfaces.ReadOnlySignedBeaconBlock, error) {
+	return s.head.block.Copy()
+}
+
+// This returns the head state.
+// It does a full copy on head state for immutability.
+// This is a lock free version.
+func (s *Service) headState(ctx context.Context) state.BeaconState {
+	_, span := trace.StartSpan(ctx, "blockChain.headState")
+	defer span.End()
+
+	return s.head.state.Copy()
+}
+
+// This returns a read only version of the head state.
+// It does not perform a copy of the head state.
+// This is a lock free version.
+func (s *Service) headStateReadOnly(ctx context.Context) state.ReadOnlyBeaconState {
+	_, span := trace.StartSpan(ctx, "blockChain.headStateReadOnly")
+	defer span.End()
+
+	return s.head.state
+}
+
+// This returns the genesis validators root of the head state.
+// This is a lock free version.
+func (s *Service) headGenesisValidatorsRoot() [32]byte {
+	return bytesutil.ToBytes32(s.head.state.GenesisValidatorsRoot())
+}
+
+// This returns the validator referenced by the provided index in
+// the head state.
+// This is a lock free version.
+func (s *Service) headValidatorAtIndex(index primitives.ValidatorIndex) (state.ReadOnlyValidator, error) {
+	return s.head.state.ValidatorAtIndexReadOnly(index)
+}
+
+// This returns the validator index referenced by the provided pubkey in
+// the head state.
+// This is a lock free version.
+func (s *Service) headValidatorIndexAtPubkey(pubKey [fieldparams.BLSPubkeyLength]byte) (primitives.ValidatorIndex, bool) {
+	return s.head.state.ValidatorIndexByPubkey(pubKey)
+}
+
+// Returns true if head state exists.
+// This is the lock free version.
+func (s *Service) hasHeadState() bool {
+	return s.head != nil && s.head.state != nil
+}
+
+// Notifies a common event feed of a new chain head event. Called right after a new
+// chain head is determined, set, and saved to disk.
+func (s *Service) notifyNewHeadEvent(
+	ctx context.Context,
+	newHeadSlot primitives.Slot,
+	newHeadStateRoot,
+	newHeadRoot [32]byte,
+) error {
+	currEpoch := slots.ToEpoch(newHeadSlot)
+	previousDutyDependentRoot, currentDutyDependentRoot, err := s.headEventDependentRoots(currEpoch)
+	if err != nil {
+		return err
+	}
+
+	isOptimistic, err := s.IsOptimistic(ctx)
+	if err != nil {
+		return errors.Wrap(err, "could not check if node is optimistically synced")
+	}
+
+	epochTransition, err := s.headEpochTransition(newHeadSlot, newHeadRoot)
+	if err != nil {
+		return err
+	}
+
+	s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
+		Type: statefeed.NewHead,
+		Data: &statefeed.HeadData{
+			Slot:                      newHeadSlot,
+			Block:                     newHeadRoot,
+			State:                     newHeadStateRoot,
+			EpochTransition:           epochTransition,
+			PreviousDutyDependentRoot: previousDutyDependentRoot,
+			CurrentDutyDependentRoot:  currentDutyDependentRoot,
+			ExecutionOptimistic:       isOptimistic,
+		},
+	})
+
+	return nil
+}
+
+// notifyNewHeadV2Event emits the head_v2 event for the head at newHeadRoot.
+func (s *Service) notifyNewHeadV2Event(
+	ctx context.Context,
+	newHeadSlot primitives.Slot,
+	newHeadStateRoot, newHeadRoot [32]byte,
+	headVersion int,
+	full bool,
+) error {
+	var payloadStatus api.PayloadStatus = api.PayloadStatusFull
+	if headVersion >= version.Gloas && !full {
+		payloadStatus = api.PayloadStatusEmpty
+
+	}
+	s.headV2EventLock.Lock()
+	defer s.headV2EventLock.Unlock()
+	if newHeadRoot == s.lastHeadV2Root && payloadStatus == s.lastHeadV2Status {
+		return nil
+	}
+	currEpoch := slots.ToEpoch(newHeadSlot)
+	currentEpochDependentRoot, nextEpochDependentRoot, err := s.headEventDependentRoots(currEpoch)
+	if err != nil {
+		return err
+	}
+
+	isOptimistic, err := s.IsOptimisticForRoot(ctx, newHeadRoot)
+	if err != nil {
+		return errors.Wrap(err, "could not check if node is optimistically synced")
+	}
+
+	epochTransition, err := s.headEpochTransition(newHeadSlot, newHeadRoot)
+	if err != nil {
+		return err
+	}
+
+	s.lastHeadV2Root, s.lastHeadV2Status = newHeadRoot, payloadStatus
+	s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
+		Type: statefeed.NewHeadV2,
+		Data: &statefeed.HeadV2Data{
+			Slot:                      newHeadSlot,
+			Block:                     newHeadRoot,
+			State:                     newHeadStateRoot,
+			EpochTransition:           epochTransition,
+			ExecutionOptimistic:       isOptimistic,
+			CurrentEpochDependentRoot: currentEpochDependentRoot,
+			NextEpochDependentRoot:    nextEpochDependentRoot,
+			PayloadStatus:             payloadStatus,
+			Version:                   headVersion,
+		},
+	})
+
+	return nil
+}
+
+// headEventDependentRoots computes the previous/current duty dependent roots shared by the
+// head and head_v2 events for the given head epoch, falling back to the origin root.
+// Note that the return values can be differently named depending on the context
+// they are used; head and head_v2.
+//
+// All dependent roots use the genesis block root in the case of underflow.
+func (s *Service) headEventDependentRoots(currEpoch primitives.Epoch) (previousDutyDependentRoot, currentDutyDependentRoot [32]byte, err error) {
+	currentDutyDependentRoot, err = s.DependentRoot(currEpoch)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, errors.Wrap(err, "could not get duty dependent root")
+	}
+	if currentDutyDependentRoot == [32]byte{} {
+		currentDutyDependentRoot = s.originBlockRoot
+	}
+	if currEpoch > 0 {
+		previousDutyDependentRoot, err = s.DependentRoot(currEpoch.Sub(1))
+		if err != nil {
+			return [32]byte{}, [32]byte{}, errors.Wrap(err, "could not get duty dependent root")
+		}
+	}
+	if previousDutyDependentRoot == [32]byte{} {
+		previousDutyDependentRoot = s.originBlockRoot
+	}
+	return previousDutyDependentRoot, currentDutyDependentRoot, nil
+}
+
+// headEpochTransition reports whether the head at newHeadSlot crossed an epoch boundary
+// relative to its parent block.
+func (s *Service) headEpochTransition(newHeadSlot primitives.Slot, newHeadRoot [32]byte) (bool, error) {
+	// Consider the head to be an epoch transition if it is the genesis block.
+	if newHeadSlot == 0 {
+		return true, nil
+	}
+
+	parentRoot, err := s.ParentRoot(newHeadRoot)
+	if err != nil {
+		return false, errors.Wrap(err, "could not obtain parent root in forkchoice")
+	}
+	parentSlot, err := s.RecentBlockSlot(parentRoot)
+	if err != nil {
+		return false, errors.Wrap(err, "could not obtain parent slot in forkchoice")
+	}
+	return slots.ToEpoch(newHeadSlot) > slots.ToEpoch(parentSlot), nil
+}
+
+// This saves the Attestations and BLSToExecChanges between `orphanedRoot` and the common ancestor root that is derived using `newHeadRoot`.
+// It also filters out the attestations that is one epoch older as a defense so invalid attestations don't flow into the attestation pool.
+func (s *Service) saveOrphanedOperations(ctx context.Context, orphanedRoot [32]byte, newHeadRoot [32]byte) error {
+	commonAncestorRoot, _, err := s.cfg.ForkChoiceStore.CommonAncestor(ctx, newHeadRoot, orphanedRoot)
+	switch {
+	// Exit early if there's no common ancestor and root doesn't exist, there would be nothing to save.
+	case errors.Is(err, forkchoice.ErrUnknownCommonAncestor):
+		return nil
+	case err != nil:
+		return err
+	}
+	for orphanedRoot != commonAncestorRoot {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		orphanedBlk, err := s.getBlock(ctx, orphanedRoot)
+		if err != nil {
+			return err
+		}
+		// If the block is an epoch older, break out of the loop since we can't include atts anyway.
+		// This prevents stuck within this for loop longer than necessary.
+		if orphanedBlk.Block().Slot()+params.BeaconConfig().SlotsPerEpoch <= s.CurrentSlot() {
+			break
+		}
+		for _, a := range orphanedBlk.Block().Body().Attestations() {
+			// if the attestation is one epoch older, it wouldn't been useful to save it.
+			if a.GetData().Slot+params.BeaconConfig().SlotsPerEpoch < s.CurrentSlot() {
+				continue
+			}
+			if features.Get().EnableExperimentalAttestationPool {
+				if err = s.cfg.AttestationCache.Add(a); err != nil {
+					return err
+				}
+			} else {
+				if orphanedBlk.Version() >= version.Electra {
+					if err = s.cfg.AttPool.SaveBlockAttestation(a); err != nil {
+						return err
+					}
+				} else if a.IsAggregated() {
+					if err = s.cfg.AttPool.SaveAggregatedAttestation(a); err != nil {
+						return err
+					}
+				} else {
+					if err = s.cfg.AttPool.SaveUnaggregatedAttestation(a); err != nil {
+						return err
+					}
+				}
+			}
+			saveOrphanedAttCount.Inc()
+		}
+		for _, as := range orphanedBlk.Block().Body().AttesterSlashings() {
+			if err := s.cfg.SlashingPool.InsertAttesterSlashing(ctx, s.headStateReadOnly(ctx), as); err != nil {
+				log.WithError(err).Error("Could not insert reorg attester slashing")
+			}
+		}
+		for _, vs := range orphanedBlk.Block().Body().ProposerSlashings() {
+			if err := s.cfg.SlashingPool.InsertProposerSlashing(ctx, s.headStateReadOnly(ctx), vs); err != nil {
+				log.WithError(err).Error("Could not insert reorg proposer slashing")
+			}
+		}
+		for _, v := range orphanedBlk.Block().Body().VoluntaryExits() {
+			s.cfg.ExitPool.InsertVoluntaryExit(v)
+		}
+		if orphanedBlk.Version() >= version.Capella {
+			changes, err := orphanedBlk.Block().Body().BLSToExecutionChanges()
+			if err != nil {
+				return errors.Wrap(err, "could not get BLSToExecutionChanges")
+			}
+			for _, c := range changes {
+				s.cfg.BLSToExecPool.InsertBLSToExecChange(c)
+			}
+		}
+		parentRoot := orphanedBlk.Block().ParentRoot()
+		orphanedRoot = bytesutil.ToBytes32(parentRoot[:])
+	}
+	return nil
+}

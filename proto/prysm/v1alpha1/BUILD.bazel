@@ -1,0 +1,248 @@
+##############################################################################
+# Common
+##############################################################################
+
+##############################################################################
+# Go
+##############################################################################
+# gazelle:ignore
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("//proto:ssz_proto_library.bzl", "ssz_proto_files")
+load("//tools:methodical.bzl", "ssz_methodical")
+
+proto_library(
+    name = "proto",
+    srcs = [
+        "beacon_chain.proto",
+        "debug.proto",
+        "eip_7251.proto",
+        "finalized_block_root_container.proto",
+        "health.proto",
+        "node.proto",
+        "p2p_messages.proto",
+        "p2p_messages_gloas.proto",
+        "powchain.proto",
+        "slasher.proto",
+        "validator.proto",
+        ":ssz_proto_files",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//proto/engine/v1:proto",
+        "//proto/eth/ext:proto",
+        "@com_google_protobuf//:any_proto",
+        "@com_google_protobuf//:descriptor_proto",
+        "@com_google_protobuf//:empty_proto",
+        "@com_google_protobuf//:timestamp_proto",
+        "@com_google_protobuf//:wrappers_proto",
+        "@googleapis//google/api:annotations_proto",
+    ],
+)
+
+##############################################################################
+# Go
+##############################################################################
+
+ssz_methodical(
+    name = "methodical_phase0",
+    deps = [":go_proto"],
+    config_file = "phase0.yaml",
+    override_package_name = "eth",
+    out = "phase0.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_altair",
+    deps = [":go_proto"],
+    config_file = "altair.yaml",
+    override_package_name = "eth",
+    out = "altair.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_bellatrix",
+    deps = [":go_proto"],
+    config_file = "bellatrix.yaml",
+    override_package_name = "eth",
+    out = "bellatrix.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_capella",
+    deps = [":go_proto"],
+    config_file = "capella.yaml",
+    override_package_name = "eth",
+    out = "capella.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_deneb",
+    deps = [":go_proto"],
+    config_file = "deneb.yaml",
+    override_package_name = "eth",
+    out = "deneb.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_electra",
+    deps = [":go_proto"],
+    config_file = "electra.yaml",
+    override_package_name = "eth",
+    out = "electra.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_fulu",
+    deps = [":go_proto"],
+    config_file = "fulu.yaml",
+    override_package_name = "eth",
+    out = "fulu.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_gloas",
+    deps = [":go_proto"],
+    config_file = "gloas.yaml",
+    override_package_name = "eth",
+    out = "gloas.ssz.go",
+)
+
+ssz_methodical(
+    name = "methodical_non_core",
+    deps = [":go_proto"],
+    config_file = "non-core.yaml",
+    out = "non-core.ssz.go",
+    override_package_name = "eth",
+)
+
+go_proto_library(
+    name = "go_proto",
+    compilers = [
+        "@com_github_prysmaticlabs_protoc_gen_go_cast//:go_cast_grpc",
+    ],
+    importpath = "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1",
+    proto = ":proto",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//consensus-types/primitives:go_default_library",
+        "//math:go_default_library",
+        "//proto/engine/v1:go_default_library",
+        "//proto/eth/ext:go_default_library",
+        "@com_github_golang_protobuf//proto:go_default_library",
+        "@com_github_prysmaticlabs_go_bitfield//:go_default_library",
+        "@googleapis//google/api:annotations_go_proto",
+        "@io_bazel_rules_go//proto/wkt:descriptor_go_proto",
+        "@io_bazel_rules_go//proto/wkt:timestamp_go_proto",
+        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
+        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
+        "@org_golang_google_protobuf//types/descriptorpb:go_default_library",
+        "@org_golang_google_protobuf//types/known/emptypb:go_default_library",
+        "@org_golang_google_protobuf//types/known/timestamppb:go_default_library",
+        "@org_golang_google_protobuf//types/known/wrapperspb:go_default_library",
+    ],
+)
+
+go_library(
+    name = "go_default_library",
+    srcs = [
+        "attestation.go",
+        "beacon_block.go",
+        "cloners.go",
+        "eip_7521.go",
+        "gloas.go",
+        "log.go",
+        "sync_committee_mainnet.go",
+        "sync_committee_minimal.go",  # keep
+        "payload_attestation_mainnet.go",
+        "payload_attestation_minimal.go",  # keep
+        ":methodical_altair", # keep
+        ":methodical_bellatrix", # keep
+        ":methodical_capella", # keep
+        ":methodical_deneb", # keep
+        ":methodical_electra", # keep
+        ":methodical_fulu", # keep
+        ":methodical_gloas", # keep
+        ":methodical_non_core", # keep
+        ":methodical_phase0", # keep
+        "validator.go",
+    ],
+    embed = [":go_proto"],
+    importpath = "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//encoding/bytesutil:go_default_library",
+        "//math:go_default_library",
+        "//proto/engine/v1:go_default_library",
+        "//proto/eth/ext:go_default_library",
+        "//runtime/version:go_default_library",
+        "@com_github_golang_protobuf//proto:go_default_library",
+        "@com_github_pkg_errors//:go_default_library",
+        "@com_github_offchainlabs_methodical_ssz//ssz:go_default_library",
+	"@com_github_prysmaticlabs_fastssz//:go_default_library",
+        "@com_github_prysmaticlabs_go_bitfield//:go_default_library",  # keep
+        "@com_github_sirupsen_logrus//:go_default_library",
+        "@com_github_sirupsen_logrus//hooks/test:go_default_library",
+        "@googleapis//google/api:annotations_go_proto",
+        "@io_bazel_rules_go//proto/wkt:descriptor_go_proto",
+        "@io_bazel_rules_go//proto/wkt:empty_go_proto",
+        "@io_bazel_rules_go//proto/wkt:timestamp_go_proto",
+        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//codes:go_default_library",
+        "@org_golang_google_grpc//grpclog:go_default_library",
+        "@org_golang_google_grpc//metadata:go_default_library",
+        "@org_golang_google_grpc//status:go_default_library",
+        "@org_golang_google_protobuf//proto:go_default_library",
+        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
+        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
+        "@org_golang_google_protobuf//types/descriptorpb:go_default_library",
+        "@org_golang_google_protobuf//types/known/emptypb:go_default_library",
+    ],
+)
+
+ssz_proto_files(
+    name = "ssz_proto_files",
+    srcs = [
+        "attestation.proto",
+        "beacon_block.proto",
+        "beacon_core_types.proto",
+        "beacon_state.proto",
+        "blobs.proto",
+        "data_columns.proto",
+        "gloas.proto",
+	"gloas_builder_api.proto",
+        "light_client.proto",
+        "partial_data_columns.proto",
+        "sync_committee.proto",
+        "withdrawals.proto",
+    ],
+    config = select({
+        "//conditions:default": "mainnet",
+        "//proto:ssz_mainnet": "mainnet",
+        "//proto:ssz_minimal": "minimal",
+    }),
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = [
+        "attestation_gloas_test.go",
+        "attestation_fuzz_test.go",
+        "beacon_block_fuzz_test.go",
+        "cloners_test.go",
+        "eip_7521_fuzz_test.go",
+        "export_test.go",
+        "fuzz_test.go",
+        "gloas_test.go",
+        "partial_data_columns_proto_test.go",
+    ],
+    data = ["partial_data_columns.proto"],
+    embed = [":go_default_library"],
+    deps = [
+        "//testing/assert:go_default_library",
+        "//testing/require:go_default_library",
+        "//testing/util:go_default_library",
+        "@com_github_google_gofuzz//:go_default_library",
+    ],
+)

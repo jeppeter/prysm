@@ -1,0 +1,62 @@
+# Ignore bazel directories
+bazel-*
+
+# `make gen` content cache
+.gen-cache.json
+
+.DS_Store
+.swp
+
+# Ignore VI/Vim swapfiles
+.*.sw?
+
+# IntelliJ
+.idea
+.ijwb
+
+# delve debugger output (not sure how to get rid of these)
+**/debug.test
+
+# Coverage outputs
+coverage.txt
+profile.out
+profile.grind
+
+# Nodejs
+node_modules
+yarn-error.log
+.vscode/
+
+# Ignore password file
+password.txt
+
+# Dist files
+dist
+
+# deepsource cli
+bin
+
+# p2p metaData
+metaData
+
+# execution API authentication
+jwt.hex
+
+# manual testing
+tmp
+
+# spectest coverage reports
+report.txt
+
+# Agent instructions (devs opt in locally; canonical copy lives in .agents/)
+AGENTS.md
+!.agents/AGENTS.md
+CLAUDE.md
+
+# Local CLAUDE instruction
+CLAUDE.local.md
+
+# Downloaded external test data (make testdata)
+third_party/testdata
+# methodical generated tests, which include large fixtures
+testing/spectest/methodical

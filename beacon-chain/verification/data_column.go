@@ -1,0 +1,658 @@
+package verification
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/helpers"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/peerdas"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/core/transition"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	"github.com/OffchainLabs/prysm/v7/runtime/logging"
+	"github.com/OffchainLabs/prysm/v7/time/slots"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+)
+
+var (
+	// GossipDataColumnSidecarRequirements defines the set of requirements that DataColumnSidecars received on gossip
+	// must satisfy in order to upgrade an RODataColumn to a VerifiedRODataColumn.
+	// https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/p2p-interface.md#data_column_sidecar_subnet_id
+	GossipDataColumnSidecarRequirements = []Requirement{
+		RequireValidFields,
+		RequireCorrectSubnet,
+		RequireNotFromFutureSlot,
+		RequireSlotAboveFinalized,
+		RequireValidProposerSignature,
+		RequireSidecarParentSeen,
+		RequireSidecarParentValid,
+		RequireSidecarParentSlotLower,
+		RequireSidecarDescendsFromFinalized,
+		RequireSidecarInclusionProven,
+		RequireSidecarKzgProofVerified,
+		RequireSidecarProposerExpected,
+	}
+
+	PartialColumnRequirements = requirementList(GossipDataColumnSidecarRequirements).excluding(RequireCorrectSubnet)
+
+	// ByRangeRequestDataColumnSidecarRequirements defines the set of requirements that DataColumnSidecars received
+	// via the by range request must satisfy in order to upgrade an RODataColumn to a VerifiedRODataColumn.
+	// https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/p2p-interface.md#datacolumnsidecarsbyrange-v1
+	ByRangeRequestDataColumnSidecarRequirements = []Requirement{
+		RequireValidFields,
+		RequireSidecarInclusionProven,
+		RequireSidecarKzgProofVerified,
+	}
+
+	// ByRootRequestDataColumnSidecarRequirements defines the set of requirements that DataColumnSidecars received
+	// via the by root request must satisfy in order to upgrade an RODataColumn to a VerifiedRODataColumn.
+	// https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/p2p-interface.md#datacolumnsidecarsbyroot-v1
+	ByRootRequestDataColumnSidecarRequirements = []Requirement{
+		RequireValidFields,
+		RequireSidecarInclusionProven,
+		RequireSidecarKzgProofVerified,
+	}
+
+	// SpectestDataColumnSidecarRequirements is used by the forkchoice spectests when verifying data columns used in the on_block tests.
+	SpectestDataColumnSidecarRequirements = requirementList(GossipDataColumnSidecarRequirements).excluding(
+		RequireSidecarParentSeen, RequireSidecarParentValid)
+
+	errColumnsInvalid = errors.New("data columns failed verification")
+	errBadTopicLength = errors.New("topic length is invalid")
+	errBadTopic       = errors.New("topic is not of the one expected")
+)
+
+type LazyHeadStateProvider struct {
+	HeadStateProvider
+}
+
+var _ HeadStateProvider = &LazyHeadStateProvider{}
+
+// PartialColumnVerifier is used to verify a partial data column before it can be used as a fully verified data column
+// Note: It is not thread safe and the caller is responsible for thread-safety
+type PartialColumnVerifier struct {
+	DataColumnsVerifier
+	Column *blocks.PartialDataColumn
+}
+
+// NewPartialColumnVerifier creates a PartialColumnVerifier that wraps the given DataColumnsVerifier and partial column.
+func NewPartialColumnVerifier(dv DataColumnsVerifier, col *blocks.PartialDataColumn) *PartialColumnVerifier {
+	return &PartialColumnVerifier{
+		DataColumnsVerifier: dv,
+		Column:              col,
+	}
+}
+
+// Complete returns the fully VerifiedRODataColumn once every cell has been collected and the column passes
+// verification. The boolean is false (with a nil error) while the column is still incomplete.
+func (pv *PartialColumnVerifier) Complete() (blocks.VerifiedRODataColumn, bool, error) {
+	if !pv.Column.IsComplete() {
+		return blocks.VerifiedRODataColumn{}, false, nil
+	}
+
+	// now that we have all the cells and proofs, the valid fields check should pass
+	if err := pv.ValidFields(); err != nil {
+		return blocks.VerifiedRODataColumn{}, false, err
+	}
+
+	pv.SatisfyRequirement(RequireSidecarKzgProofVerified)
+
+	cols, err := pv.VerifiedRODataColumns()
+	if err != nil {
+		return blocks.VerifiedRODataColumn{}, false, err
+	}
+	if len(cols) != 1 {
+		return blocks.VerifiedRODataColumn{}, false, errors.New("unexpected number of verified data columns")
+	}
+	return cols[0], true, nil
+}
+
+// ExtendFromVerifiedCell adds an already-verified cell and proof at the given index, returning true if it was newly added.
+func (pv *PartialColumnVerifier) ExtendFromVerifiedCell(cellIndex uint64, cell, proof []byte) bool {
+	return pv.Column.ExtendFromVerifiedCell(cellIndex, cell, proof)
+}
+
+type (
+	RODataColumnsVerifier struct {
+		*sharedResources
+		results                     *results
+		dataColumns                 []blocks.RODataColumn
+		verifyDataColumnsCommitment rodataColumnsCommitmentVerifier
+		stateByRoot                 map[[fieldparams.RootLength]byte]state.BeaconState
+	}
+
+	rodataColumnsCommitmentVerifier func([]blocks.RODataColumn) error
+)
+
+var _ DataColumnsVerifier = &RODataColumnsVerifier{}
+
+// VerifiedRODataColumns "upgrades" wrapped RODataColumns to VerifiedRODataColumns.
+// If any of the verifications ran against the data columns failed, or some required verifications
+// were not run, an error will be returned.
+func (dv *RODataColumnsVerifier) VerifiedRODataColumns() ([]blocks.VerifiedRODataColumn, error) {
+	if !dv.results.allSatisfied() {
+		return nil, dv.results.errors(errColumnsInvalid)
+	}
+
+	verifiedRODataColumns := make([]blocks.VerifiedRODataColumn, 0, len(dv.dataColumns))
+	for _, dataColumn := range dv.dataColumns {
+		verifiedRODataColumn := blocks.NewVerifiedRODataColumn(dataColumn)
+		verifiedRODataColumns = append(verifiedRODataColumns, verifiedRODataColumn)
+	}
+
+	return verifiedRODataColumns, nil
+}
+
+// SatisfyRequirement allows the caller to assert that a requirement has been satisfied.
+// This gives us a way to tick the box for a requirement where the usual method would be impractical.
+// For example, when batch syncing, forkchoice is only updated at the end of the batch. So the checks that use
+// forkchoice, like descends from finalized or parent seen, would necessarily fail. Allowing the caller to
+// assert the requirement has been satisfied ensures we have an easy way to audit which piece of code is satisfying
+// a requirement outside of this package.
+func (dv *RODataColumnsVerifier) SatisfyRequirement(req Requirement) {
+	dv.recordResult(req, nil)
+}
+
+func (dv *RODataColumnsVerifier) recordResult(req Requirement, err *error) {
+	if err == nil || *err == nil {
+		dv.results.record(req, nil)
+		return
+	}
+	dv.results.record(req, *err)
+}
+
+func (dv *RODataColumnsVerifier) ValidFields() (err error) {
+	if ok, err := dv.results.cached(RequireValidFields); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireValidFields, &err)
+
+	for _, dataColumn := range dv.dataColumns {
+		if err := peerdas.VerifyDataColumnSidecar(dataColumn); err != nil {
+			return columnErrBuilder(errors.Wrap(err, "verify data column sidecar"))
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) CorrectSubnet(dataColumnSidecarSubTopic string, expectedTopics []string) (err error) {
+	if ok, err := dv.results.cached(RequireCorrectSubnet); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireCorrectSubnet, &err)
+
+	if len(expectedTopics) != len(dv.dataColumns) {
+		return columnErrBuilder(errBadTopicLength)
+	}
+
+	for i := range dv.dataColumns {
+		// We add a trailing slash to avoid, for example,
+		// an actual topic /eth2/9dc47cc6/data_column_sidecar_1
+		// to match with /eth2/9dc47cc6/data_column_sidecar_120
+		expectedTopic := expectedTopics[i] + "/"
+
+		actualSubnet := peerdas.ComputeSubnetForDataColumnSidecar(dv.dataColumns[i].Index())
+		actualSubTopic := fmt.Sprintf(dataColumnSidecarSubTopic, actualSubnet)
+
+		if !strings.Contains(expectedTopic, actualSubTopic) {
+			return columnErrBuilder(errBadTopic)
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) NotFromFutureSlot() (err error) {
+	if ok, err := dv.results.cached(RequireNotFromFutureSlot); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireNotFromFutureSlot, &err)
+
+	// Retrieve the current slot.
+	currentSlot := dv.clock.CurrentSlot()
+
+	// Get the current time.
+	now := dv.clock.Now()
+
+	// Retrieve the maximum gossip clock disparity.
+	maximumGossipClockDisparity := params.BeaconConfig().MaximumGossipClockDisparityDuration()
+
+	for _, dataColumn := range dv.dataColumns {
+		// Extract the data column slot.
+		dataColumnSlot := dataColumn.Slot()
+
+		// Skip if the data column slot is the same as the current slot.
+		if currentSlot == dataColumnSlot {
+			continue
+		}
+
+		// earliestStart represents the time the slot starts, lowered by MAXIMUM_GOSSIP_CLOCK_DISPARITY.
+		// We lower the time by MAXIMUM_GOSSIP_CLOCK_DISPARITY in case system time is running slightly behind real time.
+		earliestStart, err := dv.clock.SlotStart(dataColumnSlot)
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "failed to determine slot start time from clock waiter"))
+		}
+		earliestStart = earliestStart.Add(-maximumGossipClockDisparity)
+
+		// If the system time is still before earliestStart, we consider the column from a future slot and return an error.
+		if now.Before(earliestStart) {
+			return columnErrBuilder(errFromFutureSlot)
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) SlotAboveFinalized() (err error) {
+	if ok, err := dv.results.cached(RequireSlotAboveFinalized); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSlotAboveFinalized, &err)
+
+	// Retrieve the finalized checkpoint.
+	finalizedCheckpoint := dv.fc.FinalizedCheckpoint()
+
+	// Compute the first slot of the finalized checkpoint epoch.
+	startSlot, err := slots.EpochStart(finalizedCheckpoint.Epoch)
+	if err != nil {
+		return columnErrBuilder(errors.Wrap(err, "epoch start"))
+	}
+
+	for _, dataColumn := range dv.dataColumns {
+		// Check if the data column slot is after first slot of the epoch corresponding to the finalized checkpoint.
+		if dataColumn.Slot() <= startSlot {
+			return columnErrBuilder(errSlotNotAfterFinalized)
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) ValidProposerSignature(ctx context.Context) (err error) {
+	if ok, err := dv.results.cached(RequireValidProposerSignature); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireValidProposerSignature, &err)
+
+	for _, dataColumn := range dv.dataColumns {
+		// Extract the signature data from the data column.
+		signatureData, err := columnToSignatureData(dataColumn)
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "column to signature data"))
+		}
+
+		// Get logging fields.
+		fields := logging.DataColumnFields(dataColumn)
+		log := log.WithFields(fields)
+
+		// First check if there is a cached verification that can be reused.
+		seen, err := dv.sc.SignatureVerified(signatureData)
+		if err != nil {
+			log.WithError(err).Debug("Reusing failed proposer signature validation from cache")
+
+			columnVerificationProposerSignatureCache.WithLabelValues("hit-invalid").Inc()
+			return columnErrBuilder(ErrInvalidProposerSignature)
+		}
+
+		// If yes, we can skip the full verification.
+		if seen {
+			columnVerificationProposerSignatureCache.WithLabelValues("hit-valid").Inc()
+			continue
+		}
+
+		// Ensure the expensive signature verification is only performed once for
+		// concurrent requests for the same signature data.
+		if _, err, _ = dv.sg.Do(signatureData.concat(), func() (any, error) {
+			columnVerificationProposerSignatureCache.WithLabelValues("miss").Inc()
+
+			// Retrieve a state compatible with the data column for verification.
+			verifyingState, err := dv.getVerifyingState(ctx, dataColumn)
+			if err != nil {
+				return nil, columnErrBuilder(errors.Wrap(err, "verifying state"))
+			}
+
+			// Full verification, which will subsequently be cached for anything sharing the signature cache.
+			if err = dv.sc.VerifySignature(signatureData, verifyingState); err != nil {
+				return nil, columnErrBuilder(errors.Wrap(err, "verify signature"))
+			}
+
+			return nil, nil
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// getVerifyingState returns a state that is compatible with the column sidecar and can be used to verify signature and proposer index.
+// The returned state is guaranteed to be at the same epoch as the data column's epoch, and have the same randao mix and active
+// validator indices as the data column's parent state advanced to the data column's slot.
+func (dv *RODataColumnsVerifier) getVerifyingState(ctx context.Context, dataColumn blocks.RODataColumn) (state.ReadOnlyBeaconState, error) {
+	dataColumnSlot := dataColumn.Slot()
+	dataColumnEpoch := slots.ToEpoch(dataColumnSlot)
+	if dataColumnEpoch == 0 {
+		return dv.hsp.HeadStateReadOnly(ctx)
+	}
+	parentRoot, err := dataColumn.ParentRoot()
+	if err != nil {
+		return nil, err
+	}
+	dcDependentRoot, err := dv.fc.DependentRootForEpoch(parentRoot, dataColumnEpoch-1)
+	if err != nil {
+		return nil, err
+	}
+	headRoot, err := dv.hsp.HeadRoot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	headDependentRoot, err := dv.fc.DependentRootForEpoch(bytesutil.ToBytes32(headRoot), dataColumnEpoch-1)
+	if err != nil {
+		return nil, err
+	}
+	if dcDependentRoot == headDependentRoot {
+		headSlot := dv.hsp.HeadSlot()
+		headEpoch := slots.ToEpoch(headSlot)
+		if headEpoch == dataColumnEpoch || headEpoch == dataColumnEpoch-1 {
+			return dv.hsp.HeadStateReadOnly(ctx)
+		}
+		if headEpoch+1 < dataColumnEpoch {
+			headState, err := dv.hsp.HeadState(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return transition.ProcessSlotsUsingNextSlotCache(ctx, headState, headRoot, dataColumnSlot)
+		}
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"slot":       dataColumnSlot,
+		"parentRoot": fmt.Sprintf("%#x", parentRoot),
+		"headRoot":   fmt.Sprintf("%#x", headRoot),
+	}).Debug("Replying state for data column verification")
+	targetRoot, err := dv.fc.TargetRootForEpoch(parentRoot, dataColumnEpoch)
+	if err != nil {
+		return nil, err
+	}
+	targetState, err := dv.sr.StateByRoot(ctx, targetRoot)
+	if err != nil {
+		return nil, err
+	}
+	targetEpoch := slots.ToEpoch(targetState.Slot())
+	if targetEpoch == dataColumnEpoch || targetEpoch == dataColumnEpoch-1 {
+		return targetState, nil
+	}
+	return transition.ProcessSlotsUsingNextSlotCache(ctx, targetState, parentRoot[:], dataColumnSlot)
+}
+
+func (dv *RODataColumnsVerifier) SidecarParentSeen(parentSeen func([fieldparams.RootLength]byte) bool) (err error) {
+	if ok, err := dv.results.cached(RequireSidecarParentSeen); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSidecarParentSeen, &err)
+
+	for _, dataColumn := range dv.dataColumns {
+		// Skip if the parent root has been seen.
+		parentRoot, err := dataColumn.ParentRoot()
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "parent root"))
+		}
+		if parentSeen != nil && parentSeen(parentRoot) {
+			continue
+		}
+
+		if !dv.fc.HasNode(parentRoot) {
+			return columnErrBuilder(errors.Wrapf(errSidecarParentNotSeen, "parent root: %#x", parentRoot))
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) SidecarParentValid(badParent func([fieldparams.RootLength]byte) bool) (err error) {
+	if ok, err := dv.results.cached(RequireSidecarParentValid); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSidecarParentValid, &err)
+
+	for _, dataColumn := range dv.dataColumns {
+		parentRoot, err := dataColumn.ParentRoot()
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "parent root"))
+		}
+		if badParent != nil && badParent(parentRoot) {
+			return columnErrBuilder(errSidecarParentInvalid)
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) SidecarParentSlotLower() (err error) {
+	if ok, err := dv.results.cached(RequireSidecarParentSlotLower); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSidecarParentSlotLower, &err)
+
+	for _, dataColumn := range dv.dataColumns {
+		// Compute the slot of the parent block.
+		parentRoot, err := dataColumn.ParentRoot()
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "parent root"))
+		}
+		parentSlot, err := dv.fc.Slot(parentRoot)
+		if err != nil {
+			// Wrap ErrSidecarParentUnknown (rather than err) so callers can match it with errors.Is;
+			// see sync/validate_partial_header.go which special-cases this sentinel.
+			return columnErrBuilder(errors.Wrap(ErrSidecarParentUnknown, err.Error()))
+		}
+
+		// Check if the data column slot is after the parent slot.
+		if parentSlot >= dataColumn.Slot() {
+			return columnErrBuilder(errSlotNotAfterParent)
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) SidecarDescendsFromFinalized() (err error) {
+	if ok, err := dv.results.cached(RequireSidecarDescendsFromFinalized); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSidecarDescendsFromFinalized, &err)
+
+	for _, dataColumn := range dv.dataColumns {
+		// Extract the root of the parent block corresponding to the data column.
+		parentRoot, err := dataColumn.ParentRoot()
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "parent root"))
+		}
+
+		if !dv.fc.HasNode(parentRoot) {
+			return columnErrBuilder(errSidecarNotFinalizedDescendent)
+		}
+	}
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) SidecarInclusionProven() (err error) {
+	if ok, err := dv.results.cached(RequireSidecarInclusionProven); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSidecarInclusionProven, &err)
+
+	startTime := time.Now()
+
+	for _, dataColumn := range dv.dataColumns {
+		if dataColumn.IsGloas() {
+			continue
+		}
+		k, keyErr := inclusionProofKey(dataColumn)
+		if keyErr == nil {
+			if _, ok := dv.ic.Get(k); ok {
+				continue
+			}
+		} else {
+			log.WithError(keyErr).Error("Failed to get inclusion proof key")
+		}
+
+		if err = peerdas.VerifyDataColumnSidecarInclusionProof(dataColumn); err != nil {
+			return columnErrBuilder(ErrSidecarInclusionProofInvalid)
+		}
+
+		if keyErr == nil {
+			dv.ic.Add(k, struct{}{})
+		}
+	}
+
+	dataColumnSidecarInclusionProofVerificationHistogram.Observe(float64(time.Since(startTime).Milliseconds()))
+
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) SidecarKzgProofVerified() (err error) {
+	if ok, err := dv.results.cached(RequireSidecarKzgProofVerified); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSidecarKzgProofVerified, &err)
+
+	startTime := time.Now()
+
+	err = dv.verifyDataColumnsCommitment(dv.dataColumns)
+	if err != nil {
+		return columnErrBuilder(errors.Wrap(err, "verify data column commitment"))
+	}
+
+	DataColumnBatchKZGVerificationHistogram.WithLabelValues("direct").Observe(float64(time.Since(startTime).Milliseconds()))
+	return nil
+}
+
+func (dv *RODataColumnsVerifier) SidecarProposerExpected(ctx context.Context) (err error) {
+	if ok, err := dv.results.cached(RequireSidecarProposerExpected); ok {
+		return err
+	}
+
+	defer dv.recordResult(RequireSidecarProposerExpected, &err)
+
+	for _, dataColumn := range dv.dataColumns {
+		dataColumnSlot := dataColumn.Slot()
+
+		// Get the verifying state, it is guaranteed to have the correct proposer in the lookahead.
+		verifyingState, err := dv.getVerifyingState(ctx, dataColumn)
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "verifying state"))
+		}
+
+		// Use proposer lookahead directly
+		idx, err := helpers.BeaconProposerIndexAtSlot(ctx, verifyingState, dataColumnSlot)
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "proposer from lookahead"))
+		}
+
+		proposerIndex, err := dataColumn.ProposerIndex()
+		if err != nil {
+			return columnErrBuilder(errors.Wrap(err, "proposer index"))
+		}
+		if idx != proposerIndex {
+			return columnErrBuilder(errSidecarUnexpectedProposer)
+		}
+	}
+
+	return nil
+}
+
+func columnToSignatureData(d blocks.RODataColumn) (signatureData, error) {
+	parentRoot, err := d.ParentRoot()
+	if err != nil {
+		return signatureData{}, err
+	}
+	sbh, err := d.SignedBlockHeader()
+	if err != nil {
+		return signatureData{}, err
+	}
+	proposerIndex, err := d.ProposerIndex()
+	if err != nil {
+		return signatureData{}, err
+	}
+	return signatureData{
+		Root:      d.BlockRoot(),
+		Parent:    parentRoot,
+		Signature: bytesutil.ToBytes96(sbh.Signature),
+		Proposer:  proposerIndex,
+		Slot:      d.Slot(),
+	}, nil
+}
+
+func columnErrBuilder(baseErr error) error {
+	return errors.Wrap(baseErr, errColumnsInvalid.Error())
+}
+
+// incluseionProofKey computes a unique key based on the KZG commitments,
+// the KZG commitments inclusion proof, and the signed block header root.
+func inclusionProofKey(c blocks.RODataColumn) ([32]byte, error) {
+	const (
+		commsIncProofLen       = 4
+		commsIncProofByteCount = commsIncProofLen * 32
+	)
+
+	inclusionProof, err := c.KzgCommitmentsInclusionProof()
+	if err != nil {
+		return [32]byte{}, columnErrBuilder(errors.Wrap(err, "kzg commitments inclusion proof"))
+	}
+	if len(inclusionProof) != commsIncProofLen {
+		// This should be already enforced by ssz unmarshaling; still check so we don't panic on array bounds.
+		return [32]byte{}, columnErrBuilder(ErrSidecarInclusionProofInvalid)
+	}
+
+	commitments, err := c.KzgCommitments()
+	if err != nil {
+		return [32]byte{}, columnErrBuilder(errors.Wrap(err, "kzg commitments"))
+	}
+	commsByteCount := len(commitments) * fieldparams.KzgCommitmentSize
+	unhashedKey := make([]byte, 0, commsIncProofByteCount+fieldparams.RootLength+commsByteCount)
+
+	// Include the commitments inclusion proof in the key.
+	for _, proof := range inclusionProof {
+		unhashedKey = append(unhashedKey, proof...)
+	}
+
+	// Include the block root in the key.
+	sbh, err := c.SignedBlockHeader()
+	if err != nil {
+		return [32]byte{}, columnErrBuilder(errors.Wrap(err, "signed block header"))
+	}
+	root, err := sbh.HashTreeRoot()
+	if err != nil {
+		return [32]byte{}, columnErrBuilder(errors.Wrap(err, "hash tree root"))
+	}
+
+	unhashedKey = append(unhashedKey, root[:]...)
+
+	// Include the commitments in the key.
+	for _, commitment := range commitments {
+		unhashedKey = append(unhashedKey, commitment...)
+	}
+
+	return sha256.Sum256(unhashedKey), nil
+}

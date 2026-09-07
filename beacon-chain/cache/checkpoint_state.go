@@ -1,0 +1,109 @@
+package cache
+
+import (
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	lruwrpr "github.com/OffchainLabs/prysm/v7/cache/lru"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/crypto/hash"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/OffchainLabs/prysm/v7/time/slots"
+	lru "github.com/hashicorp/golang-lru"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	// maxCheckpointStateSize defines the max number of entries check point to state cache can contain.
+	// Choosing 10 to account for multiple forks, this allows 5 forks per epoch boundary with 2 epochs
+	// window to accept attestation based on latest spec.
+	maxCheckpointStateSize = 10
+
+	// Metrics.
+	checkpointStateMiss = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "check_point_state_cache_miss",
+		Help: "The number of check point state requests that aren't present in the cache.",
+	})
+	checkpointStateHit = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "check_point_state_cache_hit",
+		Help: "The number of check point state requests that are present in the cache.",
+	})
+	checkpointStateSize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "check_point_state_cache_size",
+		Help: "The number of entries in the check point state cache.",
+	})
+	checkpointStateEvicted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "check_point_state_cache_evicted_total",
+		Help: "The number of entries evicted from the check point state cache.",
+	})
+)
+
+// CheckpointStateCache is a struct with 1 queue for looking up state by checkpoint.
+type CheckpointStateCache struct {
+	cache *lru.Cache
+}
+
+// NewCheckpointStateCache creates a new checkpoint state cache for storing/accessing processed state.
+func NewCheckpointStateCache() *CheckpointStateCache {
+	return &CheckpointStateCache{
+		cache: lruwrpr.New(maxCheckpointStateSize),
+	}
+}
+
+// StateByCheckpoint fetches state by checkpoint. Returns true with a
+// reference to the CheckpointState info, if exists. Otherwise returns false, nil.
+func (c *CheckpointStateCache) StateByCheckpoint(cp *ethpb.Checkpoint) (state.ReadOnlyBeaconState, error) {
+	h, err := hash.Proto(cp)
+	if err != nil {
+		return nil, err
+	}
+
+	item, exists := c.cache.Get(h)
+
+	if !exists || item == nil {
+		checkpointStateMiss.Inc()
+		return nil, nil
+	}
+
+	checkpointStateHit.Inc()
+	return item.(state.ReadOnlyBeaconState), nil
+}
+
+// AddCheckpointState adds CheckpointState object to the cache. This method also trims the least
+// recently added CheckpointState object if the cache size has ready the max cache size limit.
+func (c *CheckpointStateCache) AddCheckpointState(cp *ethpb.Checkpoint, s state.ReadOnlyBeaconState) error {
+	h, err := hash.Proto(cp)
+	if err != nil {
+		return err
+	}
+
+	c.cache.Add(h, s)
+	checkpointStateSize.Set(float64(c.cache.Len()))
+	return nil
+}
+
+// EvictUpTo removes all entries from the cache whose state epoch is at
+// or before the given epoch. Returns the number of evicted entries.
+func (c *CheckpointStateCache) EvictUpTo(epoch primitives.Epoch) int {
+	evicted := 0
+	for _, key := range c.cache.Keys() {
+		// Peek is used here to avoid updating the recency of the entry,
+		// as we are only checking for eviction.
+		v, ok := c.cache.Peek(key)
+		if !ok {
+			continue
+		}
+
+		st := v.(state.ReadOnlyBeaconState)
+		if slots.ToEpoch(st.Slot()) <= epoch {
+			c.cache.Remove(key)
+			evicted++
+		}
+	}
+
+	if evicted > 0 {
+		checkpointStateSize.Set(float64(c.cache.Len()))
+		checkpointStateEvicted.Add(float64(evicted))
+	}
+
+	return evicted
+}

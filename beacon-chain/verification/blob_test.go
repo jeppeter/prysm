@@ -1,0 +1,852 @@
+package verification
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"iter"
+	"testing"
+	"time"
+
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/db"
+	forkchoicetypes "github.com/OffchainLabs/prysm/v7/beacon-chain/forkchoice/types"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/startup"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	state_native "github.com/OffchainLabs/prysm/v7/beacon-chain/state/state-native"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/blocks"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/OffchainLabs/prysm/v7/testing/require"
+	"github.com/OffchainLabs/prysm/v7/testing/util"
+	"github.com/OffchainLabs/prysm/v7/time/slots"
+	"github.com/pkg/errors"
+)
+
+func TestBlobIndexInBounds(t *testing.T) {
+	ini := &Initializer{}
+	ds := util.SlotAtEpoch(t, params.BeaconConfig().DenebForkEpoch)
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, ds, 1)
+	b := blobs[0]
+	// set Index to a value that is out of bounds
+	v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.NoError(t, v.BlobIndexInBounds())
+	require.Equal(t, true, v.results.executed(RequireBlobIndexInBounds))
+	require.NoError(t, v.results.result(RequireBlobIndexInBounds))
+
+	maxBlobs := params.BeaconConfig().MaxBlobsPerBlock(ds)
+	b.Index = uint64(maxBlobs)
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.ErrorIs(t, v.BlobIndexInBounds(), ErrBlobIndexInvalid)
+	require.Equal(t, true, v.results.executed(RequireBlobIndexInBounds))
+	require.NotNil(t, v.results.result(RequireBlobIndexInBounds))
+}
+
+func TestSlotNotTooEarly(t *testing.T) {
+	now := time.Now()
+	// make genesis 1 slot in the past
+	genesis := now.Add(-1 * time.Duration(params.BeaconConfig().SecondsPerSlot) * time.Second)
+
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 0, 1)
+	b := blobs[0]
+	// slot 1 should be 12 seconds after genesis
+	b.SignedBlockHeader.Header.Slot = 1
+
+	// This clock will give a current slot of 1 on the nose
+	happyClock := startup.NewClock(genesis, [32]byte{}, startup.WithNower(func() time.Time { return now }))
+	ini := Initializer{shared: &sharedResources{clock: happyClock}}
+	v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.NoError(t, v.NotFromFutureSlot())
+	require.Equal(t, true, v.results.executed(RequireNotFromFutureSlot))
+	require.NoError(t, v.results.result(RequireNotFromFutureSlot))
+
+	// Since we have an early return for slots that are directly equal, give a time that is less than max disparity
+	// but still in the previous slot.
+	closeClock := startup.NewClock(genesis, [32]byte{}, startup.WithNower(func() time.Time { return now.Add(-1 * params.BeaconConfig().MaximumGossipClockDisparityDuration() / 2) }))
+	ini = Initializer{shared: &sharedResources{clock: closeClock}}
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.NoError(t, v.NotFromFutureSlot())
+
+	// This clock will give a current slot of 0, with now coming more than max clock disparity before slot 1
+	disparate := now.Add(-2 * params.BeaconConfig().MaximumGossipClockDisparityDuration())
+	dispClock := startup.NewClock(genesis, [32]byte{}, startup.WithNower(func() time.Time { return disparate }))
+	// Set up initializer to use the clock that will set now to a little to far before slot 1
+	ini = Initializer{shared: &sharedResources{clock: dispClock}}
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.ErrorIs(t, v.NotFromFutureSlot(), errFromFutureSlot)
+	require.Equal(t, true, v.results.executed(RequireNotFromFutureSlot))
+	require.NotNil(t, v.results.result(RequireNotFromFutureSlot))
+}
+
+func TestSlotAboveFinalized(t *testing.T) {
+	ini := &Initializer{shared: &sharedResources{}}
+	cases := []struct {
+		name          string
+		slot          primitives.Slot
+		finalizedSlot primitives.Slot
+		err           error
+	}{
+		{
+			name: "finalized epoch < blob epoch",
+			slot: 32,
+		},
+		{
+			name: "finalized slot < blob slot (same epoch)",
+			slot: 31,
+		},
+		{
+			name:          "finalized epoch > blob epoch",
+			finalizedSlot: 32,
+			err:           errSlotNotAfterFinalized,
+		},
+		{
+			name:          "finalized slot == blob slot",
+			slot:          35,
+			finalizedSlot: 35,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			finalizedCB := func() *forkchoicetypes.Checkpoint {
+				return &forkchoicetypes.Checkpoint{
+					Epoch: slots.ToEpoch(c.finalizedSlot),
+					Root:  [32]byte{},
+				}
+			}
+			ini.shared.fc = &mockForkchoicer{FinalizedCheckpointCB: finalizedCB}
+			_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 0, 1)
+			b := blobs[0]
+			b.SignedBlockHeader.Header.Slot = c.slot
+			v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+			err := v.SlotAboveFinalized()
+			require.Equal(t, true, v.results.executed(RequireSlotAboveFinalized))
+			if c.err == nil {
+				require.NoError(t, err)
+				require.NoError(t, v.results.result(RequireSlotAboveFinalized))
+			} else {
+				require.ErrorIs(t, err, c.err)
+				require.NotNil(t, v.results.result(RequireSlotAboveFinalized))
+			}
+		})
+	}
+}
+
+func TestValidProposerSignature_Cached(t *testing.T) {
+	ctx := t.Context()
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 0, 1)
+	b := blobs[0]
+	expectedSd := blobToSignatureData(b)
+	sc := &mockSignatureCache{
+		svcb: func(sig signatureData) (bool, error) {
+			if sig != expectedSd {
+				t.Error("Did not see expected SignatureData")
+			}
+			return true, nil
+		},
+		vscb: func(sig signatureData, v validatorAtIndexer) (err error) {
+			t.Error("VerifySignature should not be called if the result is cached")
+			return nil
+		},
+	}
+	ini := Initializer{shared: &sharedResources{sc: sc, sr: &mockStateByRooter{sbr: sbrErrorIfCalled(t)}}}
+	v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.NoError(t, v.ValidProposerSignature(ctx))
+	require.Equal(t, true, v.results.executed(RequireValidProposerSignature))
+	require.NoError(t, v.results.result(RequireValidProposerSignature))
+
+	// simulate an error in the cache - indicating the previous verification failed
+	sc.svcb = func(sig signatureData) (bool, error) {
+		if sig != expectedSd {
+			t.Error("Did not see expected SignatureData")
+		}
+		return true, errors.New("derp")
+	}
+	ini = Initializer{shared: &sharedResources{sc: sc, sr: &mockStateByRooter{sbr: sbrErrorIfCalled(t)}}}
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.ErrorIs(t, v.ValidProposerSignature(ctx), ErrInvalidProposerSignature)
+	require.Equal(t, true, v.results.executed(RequireValidProposerSignature))
+	require.NotNil(t, v.results.result(RequireValidProposerSignature))
+}
+
+func TestValidProposerSignature_CacheMiss(t *testing.T) {
+	ctx := t.Context()
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 0, 1)
+	b := blobs[0]
+	expectedSd := blobToSignatureData(b)
+	sc := &mockSignatureCache{
+		svcb: func(sig signatureData) (bool, error) {
+			return false, nil
+		},
+		vscb: func(sig signatureData, v validatorAtIndexer) (err error) {
+			if expectedSd != sig {
+				t.Error("unexpected signature data")
+			}
+			return nil
+		},
+	}
+	ini := Initializer{shared: &sharedResources{sc: sc, sr: sbrForValOverride(b.ProposerIndex(), &ethpb.Validator{})}}
+	v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.NoError(t, v.ValidProposerSignature(ctx))
+	require.Equal(t, true, v.results.executed(RequireValidProposerSignature))
+	require.NoError(t, v.results.result(RequireValidProposerSignature))
+
+	// simulate state not found
+	ini = Initializer{shared: &sharedResources{sc: sc, sr: sbrNotFound(t, expectedSd.Parent)}}
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.ErrorIs(t, v.ValidProposerSignature(ctx), ErrInvalidProposerSignature)
+	require.Equal(t, true, v.results.executed(RequireValidProposerSignature))
+	require.NotNil(t, v.results.result(RequireValidProposerSignature))
+
+	// simulate successful state lookup, but sig failure
+	sbr := sbrForValOverride(b.ProposerIndex(), &ethpb.Validator{})
+	sc = &mockSignatureCache{
+		svcb: sc.svcb,
+		vscb: func(sig signatureData, v validatorAtIndexer) (err error) {
+			if expectedSd != sig {
+				t.Error("unexpected signature data")
+			}
+			return errors.New("signature, not so good!")
+		},
+	}
+	ini = Initializer{shared: &sharedResources{sc: sc, sr: sbr}}
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+
+	// make sure all the histories are clean before calling the method
+	// so we don't get polluted by previous usages
+	require.Equal(t, false, sbr.calledForRoot[expectedSd.Parent])
+	require.Equal(t, false, sc.svCalledForSig[expectedSd])
+	require.Equal(t, false, sc.vsCalledForSig[expectedSd])
+
+	// Here we're mainly checking that all the right interfaces get used in the unhappy path
+	require.ErrorIs(t, v.ValidProposerSignature(ctx), ErrInvalidProposerSignature)
+	require.Equal(t, true, sbr.calledForRoot[expectedSd.Parent])
+	require.Equal(t, true, sc.svCalledForSig[expectedSd])
+	require.Equal(t, true, sc.vsCalledForSig[expectedSd])
+	require.Equal(t, true, v.results.executed(RequireValidProposerSignature))
+	require.NotNil(t, v.results.result(RequireValidProposerSignature))
+}
+
+func badParentCb(t *testing.T, expected [32]byte, e bool) func([32]byte) bool {
+	return func(r [32]byte) bool {
+		if expected != r {
+			t.Error("badParent callback did not receive expected root")
+		}
+		return e
+	}
+}
+
+func TestSidecarParentSeen(t *testing.T) {
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 0, 1)
+	b := blobs[0]
+
+	fcHas := &mockForkchoicer{
+		HasNodeCB: func(parent [32]byte) bool {
+			if parent != b.ParentRoot() {
+				t.Error("forkchoice.HasNode called with unexpected parent root")
+			}
+			return true
+		},
+	}
+	fcLacks := &mockForkchoicer{
+		HasNodeCB: func(parent [32]byte) bool {
+			if parent != b.ParentRoot() {
+				t.Error("forkchoice.HasNode called with unexpected parent root")
+			}
+			return false
+		},
+	}
+
+	t.Run("happy path", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{fc: fcHas}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.NoError(t, v.SidecarParentSeen(nil))
+		require.Equal(t, true, v.results.executed(RequireSidecarParentSeen))
+		require.NoError(t, v.results.result(RequireSidecarParentSeen))
+	})
+	t.Run("HasNode false, no badParent cb, expected error", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{fc: fcLacks}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.ErrorIs(t, v.SidecarParentSeen(nil), errSidecarParentNotSeen)
+		require.Equal(t, true, v.results.executed(RequireSidecarParentSeen))
+		require.NotNil(t, v.results.result(RequireSidecarParentSeen))
+	})
+
+	t.Run("HasNode false, badParent true", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{fc: fcLacks}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.NoError(t, v.SidecarParentSeen(badParentCb(t, b.ParentRoot(), true)))
+		require.Equal(t, true, v.results.executed(RequireSidecarParentSeen))
+		require.NoError(t, v.results.result(RequireSidecarParentSeen))
+	})
+	t.Run("HasNode false, badParent false", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{fc: fcLacks}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.ErrorIs(t, v.SidecarParentSeen(badParentCb(t, b.ParentRoot(), false)), errSidecarParentNotSeen)
+		require.Equal(t, true, v.results.executed(RequireSidecarParentSeen))
+		require.NotNil(t, v.results.result(RequireSidecarParentSeen))
+	})
+}
+
+func TestSidecarParentValid(t *testing.T) {
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 0, 1)
+	b := blobs[0]
+	t.Run("parent valid", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.NoError(t, v.SidecarParentValid(badParentCb(t, b.ParentRoot(), false)))
+		require.Equal(t, true, v.results.executed(RequireSidecarParentValid))
+		require.NoError(t, v.results.result(RequireSidecarParentValid))
+	})
+	t.Run("parent not valid", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.ErrorIs(t, v.SidecarParentValid(badParentCb(t, b.ParentRoot(), true)), errSidecarParentInvalid)
+		require.Equal(t, true, v.results.executed(RequireSidecarParentValid))
+		require.NotNil(t, v.results.result(RequireSidecarParentValid))
+	})
+}
+
+func TestSidecarParentSlotLower(t *testing.T) {
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 1, 1)
+	b := blobs[0]
+	cases := []struct {
+		name   string
+		fcSlot primitives.Slot
+		fcErr  error
+		err    error
+	}{
+		{
+			name:  "not in fc",
+			fcErr: errors.New("not in forkchoice"),
+			err:   errSlotNotAfterParent,
+		},
+		{
+			name:   "in fc, slot lower",
+			fcSlot: b.Slot() - 1,
+		},
+		{
+			name:   "in fc, slot equal",
+			fcSlot: b.Slot(),
+			err:    errSlotNotAfterParent,
+		},
+		{
+			name:   "in fc, slot higher",
+			fcSlot: b.Slot() + 1,
+			err:    errSlotNotAfterParent,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ini := Initializer{shared: &sharedResources{fc: &mockForkchoicer{SlotCB: func(r [32]byte) (primitives.Slot, error) {
+				if b.ParentRoot() != r {
+					t.Error("forkchoice.Slot called with unexpected parent root")
+				}
+				return c.fcSlot, c.fcErr
+			}}}}
+			v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+			err := v.SidecarParentSlotLower()
+			require.Equal(t, true, v.results.executed(RequireSidecarParentSlotLower))
+			if c.err == nil {
+				require.NoError(t, err)
+				require.NoError(t, v.results.result(RequireSidecarParentSlotLower))
+			} else {
+				require.ErrorIs(t, err, c.err)
+				require.NotNil(t, v.results.result(RequireSidecarParentSlotLower))
+			}
+		})
+	}
+}
+
+func TestSidecarDescendsFromFinalized(t *testing.T) {
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 1, 1)
+	b := blobs[0]
+	t.Run("not canonical", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{fc: &mockForkchoicer{HasNodeCB: func(r [32]byte) bool {
+			if b.ParentRoot() != r {
+				t.Error("forkchoice.Slot called with unexpected parent root")
+			}
+			return false
+		}}}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.ErrorIs(t, v.SidecarDescendsFromFinalized(), errSidecarNotFinalizedDescendent)
+		require.Equal(t, true, v.results.executed(RequireSidecarDescendsFromFinalized))
+		require.NotNil(t, v.results.result(RequireSidecarDescendsFromFinalized))
+	})
+	t.Run("canonical", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{fc: &mockForkchoicer{HasNodeCB: func(r [32]byte) bool {
+			if b.ParentRoot() != r {
+				t.Error("forkchoice.Slot called with unexpected parent root")
+			}
+			return true
+		}}}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.NoError(t, v.SidecarDescendsFromFinalized())
+		require.Equal(t, true, v.results.executed(RequireSidecarDescendsFromFinalized))
+		require.NoError(t, v.results.result(RequireSidecarDescendsFromFinalized))
+	})
+}
+
+func TestSidecarInclusionProven(t *testing.T) {
+	// GenerateTestDenebBlockWithSidecar is supposed to generate valid inclusion proofs
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 1, 1)
+	b := blobs[0]
+
+	ini := Initializer{}
+	v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.NoError(t, v.SidecarInclusionProven())
+	require.Equal(t, true, v.results.executed(RequireSidecarInclusionProven))
+	require.NoError(t, v.results.result(RequireSidecarInclusionProven))
+
+	// Invert bits of the first byte of the body root to mess up the proof
+	byte0 := b.SignedBlockHeader.Header.BodyRoot[0]
+	b.SignedBlockHeader.Header.BodyRoot[0] = byte0 ^ 255
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.ErrorIs(t, v.SidecarInclusionProven(), ErrSidecarInclusionProofInvalid)
+	require.Equal(t, true, v.results.executed(RequireSidecarInclusionProven))
+	require.NotNil(t, v.results.result(RequireSidecarInclusionProven))
+}
+
+func TestSidecarInclusionProvenElectra(t *testing.T) {
+	// GenerateTestDenebBlockWithSidecar is supposed to generate valid inclusion proofs
+	_, blobs := util.GenerateTestElectraBlockWithSidecar(t, [32]byte{}, 1, 1)
+	b := blobs[0]
+
+	ini := Initializer{}
+	v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.NoError(t, v.SidecarInclusionProven())
+	require.Equal(t, true, v.results.executed(RequireSidecarInclusionProven))
+	require.NoError(t, v.results.result(RequireSidecarInclusionProven))
+
+	// Invert bits of the first byte of the body root to mess up the proof
+	byte0 := b.SignedBlockHeader.Header.BodyRoot[0]
+	b.SignedBlockHeader.Header.BodyRoot[0] = byte0 ^ 255
+	v = ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+	require.ErrorIs(t, v.SidecarInclusionProven(), ErrSidecarInclusionProofInvalid)
+	require.Equal(t, true, v.results.executed(RequireSidecarInclusionProven))
+	require.NotNil(t, v.results.result(RequireSidecarInclusionProven))
+}
+
+func TestSidecarKzgProofVerified(t *testing.T) {
+	// GenerateTestDenebBlockWithSidecar is supposed to generate valid commitments
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 1, 1)
+	b := blobs[0]
+	passes := func(vb ...blocks.ROBlob) error {
+		require.Equal(t, true, bytes.Equal(b.KzgCommitment, vb[0].KzgCommitment))
+		return nil
+	}
+	v := &ROBlobVerifier{verifyBlobCommitment: passes, results: newResults(), blob: b}
+	require.NoError(t, v.SidecarKzgProofVerified())
+	require.Equal(t, true, v.results.executed(RequireSidecarKzgProofVerified))
+	require.NoError(t, v.results.result(RequireSidecarKzgProofVerified))
+
+	fails := func(vb ...blocks.ROBlob) error {
+		require.Equal(t, true, bytes.Equal(b.KzgCommitment, vb[0].KzgCommitment))
+		return errors.New("bad blob")
+	}
+	v = &ROBlobVerifier{results: newResults(), blob: b, verifyBlobCommitment: fails}
+	require.ErrorIs(t, v.SidecarKzgProofVerified(), ErrSidecarKzgProofInvalid)
+	require.Equal(t, true, v.results.executed(RequireSidecarKzgProofVerified))
+	require.NotNil(t, v.results.result(RequireSidecarKzgProofVerified))
+}
+
+func TestSidecarProposerExpected(t *testing.T) {
+	ctx := t.Context()
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 1, 1)
+	b := blobs[0]
+	t.Run("state lookup failure", func(t *testing.T) {
+		ini := Initializer{shared: &sharedResources{sr: sbrNotFound(t, b.ParentRoot()), pc: &mockProposerCache{}, fc: &mockForkchoicer{TargetRootForEpochCB: fcReturnsTargetRoot([32]byte{})}}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.ErrorIs(t, v.SidecarProposerExpected(ctx), errSidecarUnexpectedProposer)
+		require.Equal(t, true, v.results.executed(RequireSidecarProposerExpected))
+		require.NotNil(t, v.results.result(RequireSidecarProposerExpected))
+	})
+
+	t.Run("proposer matches", func(t *testing.T) {
+		pc := &mockProposerCache{
+			ComputeProposerCB: func(_ context.Context, slot primitives.Slot, _ state.BeaconState) (primitives.ValidatorIndex, error) {
+				require.Equal(t, b.Slot(), slot)
+				return b.ProposerIndex(), nil
+			},
+		}
+		ini := Initializer{shared: &sharedResources{sr: sbrForValOverride(b.ProposerIndex(), &ethpb.Validator{}), pc: pc, fc: &mockForkchoicer{TargetRootForEpochCB: fcReturnsTargetRoot([32]byte{})}}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.NoError(t, v.SidecarProposerExpected(ctx))
+		require.Equal(t, true, v.results.executed(RequireSidecarProposerExpected))
+		require.NoError(t, v.results.result(RequireSidecarProposerExpected))
+	})
+	t.Run("proposer does not match", func(t *testing.T) {
+		pc := &mockProposerCache{
+			ComputeProposerCB: func(_ context.Context, slot primitives.Slot, _ state.BeaconState) (primitives.ValidatorIndex, error) {
+				require.Equal(t, b.Slot(), slot)
+				return b.ProposerIndex() + 1, nil
+			},
+		}
+		ini := Initializer{shared: &sharedResources{sr: sbrForValOverride(b.ProposerIndex(), &ethpb.Validator{}), pc: pc, fc: &mockForkchoicer{TargetRootForEpochCB: fcReturnsTargetRoot([32]byte{})}}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.ErrorIs(t, v.SidecarProposerExpected(ctx), errSidecarUnexpectedProposer)
+		require.Equal(t, true, v.results.executed(RequireSidecarProposerExpected))
+		require.NotNil(t, v.results.result(RequireSidecarProposerExpected))
+	})
+	t.Run("ComputeProposer fails", func(t *testing.T) {
+		pc := &mockProposerCache{
+			ComputeProposerCB: func(_ context.Context, slot primitives.Slot, _ state.BeaconState) (primitives.ValidatorIndex, error) {
+				require.Equal(t, b.Slot(), slot)
+				return 0, errors.New("ComputeProposer failed")
+			},
+		}
+		ini := Initializer{shared: &sharedResources{sr: sbrForValOverride(b.ProposerIndex(), &ethpb.Validator{}), pc: pc, fc: &mockForkchoicer{TargetRootForEpochCB: fcReturnsTargetRoot([32]byte{})}}}
+		v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+		require.ErrorIs(t, v.SidecarProposerExpected(ctx), errSidecarUnexpectedProposer)
+		require.Equal(t, true, v.results.executed(RequireSidecarProposerExpected))
+		require.NotNil(t, v.results.result(RequireSidecarProposerExpected))
+	})
+}
+
+func TestRequirementSatisfaction(t *testing.T) {
+	_, blobs := util.GenerateTestDenebBlockWithSidecar(t, [32]byte{}, 1, 1)
+	b := blobs[0]
+	ini := Initializer{}
+	v := ini.NewBlobVerifier(b, GossipBlobSidecarRequirements)
+
+	_, err := v.VerifiedROBlob()
+	require.ErrorIs(t, err, ErrBlobInvalid)
+	var me VerificationMultiError
+	ok := errors.As(err, &me)
+	require.Equal(t, true, ok)
+	fails := me.Failures()
+	// we haven't performed any verification, so all the results should be this type
+	for _, v := range fails {
+		require.ErrorIs(t, v, ErrMissingVerification)
+	}
+
+	// satisfy everything through the backdoor and ensure we get the verified ro blob at the end
+	for _, r := range GossipBlobSidecarRequirements {
+		v.results.record(r, nil)
+	}
+	require.Equal(t, true, v.results.allSatisfied())
+	_, err = v.VerifiedROBlob()
+	require.NoError(t, err)
+}
+
+type mockForkchoicer struct {
+	FinalizedCheckpointCB   func() *forkchoicetypes.Checkpoint
+	HasNodeCB               func([32]byte) bool
+	IsCanonicalCB           func(root [32]byte) bool
+	SlotCB                  func([32]byte) (primitives.Slot, error)
+	DependentRootForEpochCB func([32]byte, primitives.Epoch) ([32]byte, error)
+	TargetRootForEpochCB    func([32]byte, primitives.Epoch) ([32]byte, error)
+}
+
+var _ Forkchoicer = &mockForkchoicer{}
+
+func (m *mockForkchoicer) FinalizedCheckpoint() *forkchoicetypes.Checkpoint {
+	return m.FinalizedCheckpointCB()
+}
+
+func (m *mockForkchoicer) HasNode(root [32]byte) bool {
+	return m.HasNodeCB(root)
+}
+
+func (m *mockForkchoicer) IsCanonical(root [32]byte) bool {
+	return m.IsCanonicalCB(root)
+}
+
+func (m *mockForkchoicer) Slot(root [32]byte) (primitives.Slot, error) {
+	return m.SlotCB(root)
+}
+
+func (m *mockForkchoicer) DependentRootForEpoch(root [32]byte, epoch primitives.Epoch) ([32]byte, error) {
+	return m.DependentRootForEpochCB(root, epoch)
+}
+
+func (m *mockForkchoicer) TargetRootForEpoch(root [32]byte, epoch primitives.Epoch) ([32]byte, error) {
+	return m.TargetRootForEpochCB(root, epoch)
+}
+
+func fcReturnsTargetRoot(root [32]byte) func([32]byte, primitives.Epoch) ([32]byte, error) {
+	return func([32]byte, primitives.Epoch) ([32]byte, error) {
+		return root, nil
+	}
+}
+
+func fcReturnsDependentRoot() func([32]byte, primitives.Epoch) ([32]byte, error) {
+	return func(root [32]byte, epoch primitives.Epoch) ([32]byte, error) {
+		return root, nil
+	}
+}
+
+type mockSignatureCache struct {
+	svCalledForSig map[signatureData]bool
+	svcb           func(sig signatureData) (bool, error)
+	vsCalledForSig map[signatureData]bool
+	vscb           func(sig signatureData, v validatorAtIndexer) (err error)
+}
+
+// SignatureVerified implements signatureCache.
+func (m *mockSignatureCache) SignatureVerified(sig signatureData) (bool, error) {
+	if m.svCalledForSig == nil {
+		m.svCalledForSig = make(map[signatureData]bool)
+	}
+	m.svCalledForSig[sig] = true
+	return m.svcb(sig)
+}
+
+// VerifySignature implements signatureCache.
+func (m *mockSignatureCache) VerifySignature(sig signatureData, v validatorAtIndexer) (err error) {
+	if m.vsCalledForSig == nil {
+		m.vsCalledForSig = make(map[signatureData]bool)
+	}
+	m.vsCalledForSig[sig] = true
+	return m.vscb(sig, v)
+}
+
+var _ signatureCache = &mockSignatureCache{}
+
+type sbrfunc func(context.Context, [32]byte) (state.BeaconState, error)
+
+type mockStateByRooter struct {
+	sbr           sbrfunc
+	calledForRoot map[[32]byte]bool
+}
+
+func (sbr *mockStateByRooter) StateByRootIfCachedNoCopy(_ [32]byte) state.ReadOnlyBeaconState {
+	return nil
+}
+
+func (sbr *mockStateByRooter) StateByRoot(ctx context.Context, root [32]byte) (state.BeaconState, error) {
+	if sbr.calledForRoot == nil {
+		sbr.calledForRoot = make(map[[32]byte]bool)
+	}
+	sbr.calledForRoot[root] = true
+	return sbr.sbr(ctx, root)
+}
+
+var _ StateByRooter = &mockStateByRooter{}
+
+type mockHeadStateProvider struct {
+	headRoot          []byte
+	headSlot          primitives.Slot
+	headState         state.BeaconState
+	headStateReadOnly state.ReadOnlyBeaconState
+}
+
+func (m *mockHeadStateProvider) HeadRoot(_ context.Context) ([]byte, error) {
+	if m.headRoot != nil {
+		return m.headRoot, nil
+	}
+	root := make([]byte, 32)
+	root[0] = 0xff
+	return root, nil
+}
+
+func (m *mockHeadStateProvider) HeadSlot() primitives.Slot {
+	if m.headSlot == 0 {
+		return 1000
+	}
+	return m.headSlot
+}
+
+func (m *mockHeadStateProvider) HeadState(_ context.Context) (state.BeaconState, error) {
+	if m.headState == nil {
+		return nil, errors.New("head state not available")
+	}
+	return m.headState, nil
+}
+
+func (m *mockHeadStateProvider) HeadStateReadOnly(_ context.Context) (state.ReadOnlyBeaconState, error) {
+	if m.headStateReadOnly == nil {
+		return nil, errors.New("head state read only not available")
+	}
+	return m.headStateReadOnly, nil
+}
+
+var _ HeadStateProvider = &mockHeadStateProvider{}
+
+func sbrErrorIfCalled(t *testing.T) sbrfunc {
+	return func(_ context.Context, _ [32]byte) (state.BeaconState, error) {
+		t.Error("StateByRoot should not have been called")
+		return nil, nil
+	}
+}
+
+func sbrNotFound(t *testing.T, expectedRoot [32]byte) *mockStateByRooter {
+	return &mockStateByRooter{sbr: func(_ context.Context, parent [32]byte) (state.BeaconState, error) {
+		if parent != expectedRoot {
+			t.Errorf("did not receive expected root in StateByRootCall, want %#x got %#x", expectedRoot, parent)
+		}
+		return nil, db.ErrNotFound
+	}}
+}
+
+func sbrReturnsState(st state.BeaconState) *mockStateByRooter {
+	return &mockStateByRooter{sbr: func(_ context.Context, _ [32]byte) (state.BeaconState, error) {
+		return st, nil
+	}}
+}
+
+func sbrForValOverride(idx primitives.ValidatorIndex, val *ethpb.Validator) *mockStateByRooter {
+	return sbrForValOverrideWithT(nil, idx, val)
+}
+
+func sbrForValOverrideWithT(t testing.TB, idx primitives.ValidatorIndex, val *ethpb.Validator) *mockStateByRooter {
+	return &mockStateByRooter{sbr: func(_ context.Context, root [32]byte) (state.BeaconState, error) {
+		// Use a real deterministic state so that helpers.BeaconProposerIndexAtSlot works correctly
+		numValidators := max(uint64(idx+1), 64)
+
+		var st state.BeaconState
+		var err error
+		if t != nil {
+			st, _ = util.DeterministicGenesisStateFulu(t, numValidators)
+		} else {
+			// Fallback for blob tests that don't need the full state
+			return &validxStateOverride{
+				slot: 0,
+				vals: map[primitives.ValidatorIndex]*ethpb.Validator{
+					idx: val,
+				},
+			}, nil
+		}
+
+		// Override the specific validator if provided
+		if val != nil {
+			vals := st.Validators()
+			if idx < primitives.ValidatorIndex(len(vals)) {
+				vals[idx] = val
+				// Ensure the validator is active
+				if vals[idx].ActivationEpoch > 0 {
+					vals[idx].ActivationEpoch = 0
+				}
+				if vals[idx].ExitEpoch == 0 || vals[idx].ExitEpoch < params.BeaconConfig().FarFutureEpoch {
+					vals[idx].ExitEpoch = params.BeaconConfig().FarFutureEpoch
+				}
+				if vals[idx].EffectiveBalance == 0 {
+					vals[idx].EffectiveBalance = params.BeaconConfig().MaxEffectiveBalance
+				}
+				_ = st.SetValidators(vals)
+			}
+		}
+		return st, err
+	}}
+}
+
+type validxStateOverride struct {
+	state.BeaconState
+	slot primitives.Slot
+	vals map[primitives.ValidatorIndex]*ethpb.Validator
+}
+
+var _ state.BeaconState = &validxStateOverride{}
+
+func (v *validxStateOverride) ValidatorAtIndex(idx primitives.ValidatorIndex) (*ethpb.Validator, error) {
+	val, ok := v.vals[idx]
+	if !ok {
+		return nil, fmt.Errorf("validxStateOverride does not know index %d", idx)
+	}
+	return val, nil
+}
+
+func (v *validxStateOverride) Slot() primitives.Slot {
+	return v.slot
+}
+
+func (v *validxStateOverride) Version() int {
+	// Return Fulu version (6) as default for tests
+	return 6
+}
+
+func (v *validxStateOverride) Validators() []*ethpb.Validator {
+	// Return all validators in the map as a slice
+	maxIdx := primitives.ValidatorIndex(0)
+	for idx := range v.vals {
+		if idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	// Ensure we have at least 64 validators for a valid beacon state
+	numValidators := max(maxIdx+1, 64)
+	validators := make([]*ethpb.Validator, numValidators)
+	for i := range validators {
+		if val, ok := v.vals[primitives.ValidatorIndex(i)]; ok {
+			validators[i] = val
+		} else {
+			// Default validator for indices we don't care about
+			validators[i] = &ethpb.Validator{
+				ActivationEpoch:  0,
+				ExitEpoch:        params.BeaconConfig().FarFutureEpoch,
+				EffectiveBalance: params.BeaconConfig().MaxEffectiveBalance,
+			}
+		}
+	}
+	return validators
+}
+
+func (v *validxStateOverride) RandaoMixAtIndex(idx uint64) ([]byte, error) {
+	// Return a zero mix for simplicity in tests
+	return make([]byte, 32), nil
+}
+
+func (v *validxStateOverride) NumValidators() int {
+	return len(v.Validators())
+}
+
+func (v *validxStateOverride) ValidatorAtIndexReadOnly(idx primitives.ValidatorIndex) (state.ReadOnlyValidator, error) {
+	validators := v.Validators()
+	if idx >= primitives.ValidatorIndex(len(validators)) {
+		return nil, fmt.Errorf("validator index %d out of range", idx)
+	}
+	return state_native.NewValidator(validators[idx])
+}
+
+func (v *validxStateOverride) IsNil() bool {
+	return false
+}
+
+func (v *validxStateOverride) LatestBlockHeader() *ethpb.BeaconBlockHeader {
+	// Return a minimal block header for tests
+	return &ethpb.BeaconBlockHeader{
+		Slot:          v.slot,
+		ProposerIndex: 0,
+		ParentRoot:    make([]byte, 32),
+		StateRoot:     make([]byte, 32),
+		BodyRoot:      make([]byte, 32),
+	}
+}
+
+func (v *validxStateOverride) HashTreeRoot(ctx context.Context) ([32]byte, error) {
+	// Return a zero hash for tests
+	return [32]byte{}, nil
+}
+
+func (v *validxStateOverride) UpdateStateRootAtIndex(idx uint64, stateRoot [32]byte) error {
+	// No-op for mock - we don't track state roots
+	return nil
+}
+
+func (v *validxStateOverride) SetLatestBlockHeader(val *ethpb.BeaconBlockHeader) error {
+	// No-op for mock - we don't track block headers
+	return nil
+}
+
+func (v *validxStateOverride) ValidatorsReadOnlySeq() iter.Seq2[primitives.ValidatorIndex, state.ReadOnlyValidator] {
+	return func(yield func(primitives.ValidatorIndex, state.ReadOnlyValidator) bool) {
+		for i, val := range v.Validators() {
+			rov, err := state_native.NewValidator(val)
+			if err != nil {
+				return
+			}
+			if !yield(primitives.ValidatorIndex(i), rov) {
+				return
+			}
+		}
+	}
+}
+
+type mockProposerCache struct {
+	ComputeProposerCB func(ctx context.Context, slot primitives.Slot, pst state.BeaconState) (primitives.ValidatorIndex, error)
+}
+
+func (p *mockProposerCache) ComputeProposer(ctx context.Context, slot primitives.Slot, pst state.BeaconState) (primitives.ValidatorIndex, error) {
+	return p.ComputeProposerCB(ctx, slot, pst)
+}
+
+var _ proposerCache = &mockProposerCache{}

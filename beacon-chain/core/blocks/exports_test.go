@@ -1,0 +1,6 @@
+package blocks
+
+var ProcessBLSToExecutionChange = processBLSToExecutionChange
+var ErrInvalidBLSPrefix = errInvalidBLSPrefix
+var ErrInvalidWithdrawalCredentials = errInvalidWithdrawalCredentials
+var VerifyBlobCommitmentCount = verifyBlobCommitmentCount

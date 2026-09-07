@@ -1,0 +1,416 @@
+package state_native
+
+import (
+	"strconv"
+	"sync"
+	"testing"
+
+	"github.com/OffchainLabs/go-bitfield"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state/state-native/types"
+	"github.com/OffchainLabs/prysm/v7/beacon-chain/state/stateutil"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
+	"github.com/OffchainLabs/prysm/v7/config/params"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	"github.com/OffchainLabs/prysm/v7/testing/assert"
+	"github.com/OffchainLabs/prysm/v7/testing/require"
+)
+
+func TestBeaconState_NoDeadlock_Phase0(t *testing.T) {
+	count := uint64(100)
+	vals := make([]*ethpb.Validator, 0, count)
+	for i := uint64(1); i < count; i++ {
+		var someRoot [32]byte
+		var someKey [fieldparams.BLSPubkeyLength]byte
+		copy(someRoot[:], strconv.Itoa(int(i)))
+		copy(someKey[:], strconv.Itoa(int(i)))
+		vals = append(vals, &ethpb.Validator{
+			PublicKey:                  someKey[:],
+			WithdrawalCredentials:      someRoot[:],
+			EffectiveBalance:           params.BeaconConfig().MaxEffectiveBalance,
+			Slashed:                    false,
+			ActivationEligibilityEpoch: 1,
+			ActivationEpoch:            1,
+			ExitEpoch:                  1,
+			WithdrawableEpoch:          1,
+		})
+	}
+	newState, err := InitializeFromProtoUnsafePhase0(&ethpb.BeaconState{
+		Validators: vals,
+	})
+	assert.NoError(t, err)
+	st, ok := newState.(*BeaconState)
+	require.Equal(t, true, ok)
+
+	wg := new(sync.WaitGroup)
+
+	wg.Go(func() {
+		// Continuously lock and unlock the state
+		// by acquiring the lock.
+		for range 1000 {
+			for _, f := range st.stateFieldLeaves {
+				if f.Empty() {
+					f.InsertFieldLayer(make([][32]byte, 10), []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+				}
+				f.CopyTrie()
+			}
+		}
+	})
+	// Constantly read from the offending portion
+	// of the code to ensure there is no possible
+	// recursive read locking.
+	for range 1000 {
+		go func() {
+			_ = st.FieldReferencesCount()
+		}()
+	}
+	// Test will not terminate in the event of a deadlock.
+	wg.Wait()
+}
+
+func TestBeaconState_NoDeadlock_Altair(t *testing.T) {
+	count := uint64(100)
+	vals := make([]*ethpb.Validator, 0, count)
+	for i := uint64(1); i < count; i++ {
+		var someRoot [32]byte
+		var someKey [fieldparams.BLSPubkeyLength]byte
+		copy(someRoot[:], strconv.Itoa(int(i)))
+		copy(someKey[:], strconv.Itoa(int(i)))
+		vals = append(vals, &ethpb.Validator{
+			PublicKey:                  someKey[:],
+			WithdrawalCredentials:      someRoot[:],
+			EffectiveBalance:           params.BeaconConfig().MaxEffectiveBalance,
+			Slashed:                    false,
+			ActivationEligibilityEpoch: 1,
+			ActivationEpoch:            1,
+			ExitEpoch:                  1,
+			WithdrawableEpoch:          1,
+		})
+	}
+	st, err := InitializeFromProtoUnsafeAltair(&ethpb.BeaconStateAltair{
+		Validators: vals,
+	})
+	assert.NoError(t, err)
+	s, ok := st.(*BeaconState)
+	require.Equal(t, true, ok)
+
+	wg := new(sync.WaitGroup)
+
+	wg.Go(func() {
+		// Continuously lock and unlock the state
+		// by acquiring the lock.
+		for range 1000 {
+			for _, f := range s.stateFieldLeaves {
+				if f.Empty() {
+					f.InsertFieldLayer(make([][32]byte, 10), []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+				}
+				f.CopyTrie()
+			}
+		}
+	})
+	// Constantly read from the offending portion
+	// of the code to ensure there is no possible
+	// recursive read locking.
+	for range 1000 {
+		go func() {
+			_ = st.FieldReferencesCount()
+		}()
+	}
+	// Test will not terminate in the event of a deadlock.
+	wg.Wait()
+}
+
+func TestBeaconState_NoDeadlock_Bellatrix(t *testing.T) {
+	count := uint64(100)
+	vals := make([]*ethpb.Validator, 0, count)
+	for i := uint64(1); i < count; i++ {
+		var someRoot [32]byte
+		var someKey [fieldparams.BLSPubkeyLength]byte
+		copy(someRoot[:], strconv.Itoa(int(i)))
+		copy(someKey[:], strconv.Itoa(int(i)))
+		vals = append(vals, &ethpb.Validator{
+			PublicKey:                  someKey[:],
+			WithdrawalCredentials:      someRoot[:],
+			EffectiveBalance:           params.BeaconConfig().MaxEffectiveBalance,
+			Slashed:                    false,
+			ActivationEligibilityEpoch: 1,
+			ActivationEpoch:            1,
+			ExitEpoch:                  1,
+			WithdrawableEpoch:          1,
+		})
+	}
+	st, err := InitializeFromProtoUnsafeBellatrix(&ethpb.BeaconStateBellatrix{
+		Validators: vals,
+	})
+	assert.NoError(t, err)
+	s, ok := st.(*BeaconState)
+	require.Equal(t, true, ok)
+
+	wg := new(sync.WaitGroup)
+
+	wg.Go(func() {
+		// Continuously lock and unlock the state
+		// by acquiring the lock.
+		for range 1000 {
+			for _, f := range s.stateFieldLeaves {
+				if f.Empty() {
+					f.InsertFieldLayer(make([][32]byte, 10), []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+				}
+				f.CopyTrie()
+			}
+		}
+	})
+	// Constantly read from the offending portion
+	// of the code to ensure there is no possible
+	// recursive read locking.
+	for range 1000 {
+		go func() {
+			_ = st.FieldReferencesCount()
+		}()
+	}
+	// Test will not terminate in the event of a deadlock.
+	wg.Wait()
+}
+
+func TestBeaconState_NoDeadlock_Capella(t *testing.T) {
+	count := uint64(100)
+	vals := make([]*ethpb.Validator, 0, count)
+	for i := uint64(1); i < count; i++ {
+		var someRoot [32]byte
+		var someKey [fieldparams.BLSPubkeyLength]byte
+		copy(someRoot[:], strconv.Itoa(int(i)))
+		copy(someKey[:], strconv.Itoa(int(i)))
+		vals = append(vals, &ethpb.Validator{
+			PublicKey:                  someKey[:],
+			WithdrawalCredentials:      someRoot[:],
+			EffectiveBalance:           params.BeaconConfig().MaxEffectiveBalance,
+			Slashed:                    false,
+			ActivationEligibilityEpoch: 1,
+			ActivationEpoch:            1,
+			ExitEpoch:                  1,
+			WithdrawableEpoch:          1,
+		})
+	}
+	st, err := InitializeFromProtoUnsafeCapella(&ethpb.BeaconStateCapella{
+		Validators: vals,
+	})
+	assert.NoError(t, err)
+	s, ok := st.(*BeaconState)
+	require.Equal(t, true, ok)
+
+	wg := new(sync.WaitGroup)
+
+	wg.Go(func() {
+		// Continuously lock and unlock the state
+		// by acquiring the lock.
+		for range 1000 {
+			for _, f := range s.stateFieldLeaves {
+				if f.Empty() {
+					f.InsertFieldLayer(make([][32]byte, 10), []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+				}
+				f.CopyTrie()
+			}
+		}
+	})
+	// Constantly read from the offending portion
+	// of the code to ensure there is no possible
+	// recursive read locking.
+	for range 1000 {
+		go func() {
+			_ = st.FieldReferencesCount()
+		}()
+	}
+	// Test will not terminate in the event of a deadlock.
+	wg.Wait()
+}
+
+func TestBeaconState_NoDeadlock_Deneb(t *testing.T) {
+	count := uint64(100)
+	vals := make([]*ethpb.Validator, 0, count)
+	for i := uint64(1); i < count; i++ {
+		var someRoot [32]byte
+		var someKey [fieldparams.BLSPubkeyLength]byte
+		copy(someRoot[:], strconv.Itoa(int(i)))
+		copy(someKey[:], strconv.Itoa(int(i)))
+		vals = append(vals, &ethpb.Validator{
+			PublicKey:                  someKey[:],
+			WithdrawalCredentials:      someRoot[:],
+			EffectiveBalance:           params.BeaconConfig().MaxEffectiveBalance,
+			Slashed:                    false,
+			ActivationEligibilityEpoch: 1,
+			ActivationEpoch:            1,
+			ExitEpoch:                  1,
+			WithdrawableEpoch:          1,
+		})
+	}
+	st, err := InitializeFromProtoUnsafeDeneb(&ethpb.BeaconStateDeneb{
+		Validators: vals,
+	})
+	assert.NoError(t, err)
+	s, ok := st.(*BeaconState)
+	require.Equal(t, true, ok)
+
+	wg := new(sync.WaitGroup)
+
+	wg.Go(func() {
+		// Continuously lock and unlock the state
+		// by acquiring the lock.
+		for range 1000 {
+			for _, f := range s.stateFieldLeaves {
+				if f.Empty() {
+					f.InsertFieldLayer(make([][32]byte, 10), []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+				}
+				f.CopyTrie()
+			}
+		}
+	})
+	// Constantly read from the offending portion
+	// of the code to ensure there is no possible
+	// recursive read locking.
+	for range 1000 {
+		go func() {
+			_ = st.FieldReferencesCount()
+		}()
+	}
+	// Test will not terminate in the event of a deadlock.
+	wg.Wait()
+}
+
+func TestBeaconState_AppendBalanceWithTrie(t *testing.T) {
+
+	newState := generateState(t)
+	st, ok := newState.(*BeaconState)
+	require.Equal(t, true, ok)
+	_, err := st.HashTreeRoot(t.Context())
+	assert.NoError(t, err)
+
+	for i := range 100 {
+		if i%2 == 0 {
+			assert.NoError(t, st.UpdateBalancesAtIndex(primitives.ValidatorIndex(i), 1000))
+		}
+		if i%3 == 0 {
+			assert.NoError(t, st.AppendBalance(1000))
+		}
+	}
+	_, err = st.HashTreeRoot(t.Context())
+	assert.NoError(t, err)
+	newRt := bytesutil.ToBytes32(st.merkleLayers[0][types.Balances])
+	wantedRt, err := stateutil.Uint64ListRoot(st.version, st.Balances())
+	assert.NoError(t, err)
+	assert.Equal(t, wantedRt, newRt, "state roots are unequal")
+}
+
+func TestBeaconState_ModifyPreviousParticipationBits(t *testing.T) {
+	st, err := InitializeFromProtoUnsafePhase0(&ethpb.BeaconState{})
+	assert.NoError(t, err)
+	assert.ErrorContains(t, "ModifyPreviousParticipationBits is not supported", st.ModifyPreviousParticipationBits(func(val []byte) ([]byte, error) {
+		return nil, nil
+	}))
+}
+
+func TestBeaconState_ModifyCurrentParticipationBits(t *testing.T) {
+	st, err := InitializeFromProtoUnsafePhase0(&ethpb.BeaconState{})
+	assert.NoError(t, err)
+	assert.ErrorContains(t, "ModifyCurrentParticipationBits is not supported", st.ModifyCurrentParticipationBits(func(val []byte) ([]byte, error) {
+		return nil, nil
+	}))
+}
+
+func TestDuplicateDirtyIndices(t *testing.T) {
+	newState := &BeaconState{
+		rebuildTrie:  make(map[types.FieldIndex]bool),
+		dirtyIndices: make(map[types.FieldIndex][]uint64),
+	}
+	for i := range uint64(indicesLimit - 5) {
+		newState.dirtyIndices[types.Balances] = append(newState.dirtyIndices[types.Balances], i)
+	}
+	// Append duplicates
+	newState.dirtyIndices[types.Balances] = append(newState.dirtyIndices[types.Balances], []uint64{0, 1, 2, 3, 4}...)
+
+	// We would remove the duplicates and stay under the threshold
+	newState.addDirtyIndices(types.Balances, []uint64{20997, 20998})
+	assert.Equal(t, false, newState.rebuildTrie[types.Balances])
+
+	// We would trigger above the threshold.
+	newState.addDirtyIndices(types.Balances, []uint64{21000, 21001, 21002, 21003})
+	assert.Equal(t, true, newState.rebuildTrie[types.Balances])
+}
+
+func generateState(t *testing.T) state.BeaconState {
+	count := uint64(100)
+	vals := make([]*ethpb.Validator, 0, count)
+	bals := make([]uint64, 0, count)
+	for i := uint64(1); i < count; i++ {
+		var someRoot [32]byte
+		var someKey [fieldparams.BLSPubkeyLength]byte
+		copy(someRoot[:], strconv.Itoa(int(i)))
+		copy(someKey[:], strconv.Itoa(int(i)))
+		vals = append(vals, &ethpb.Validator{
+			PublicKey:                  someKey[:],
+			WithdrawalCredentials:      someRoot[:],
+			EffectiveBalance:           params.BeaconConfig().MaxEffectiveBalance,
+			Slashed:                    false,
+			ActivationEligibilityEpoch: 1,
+			ActivationEpoch:            1,
+			ExitEpoch:                  1,
+			WithdrawableEpoch:          1,
+		})
+		bals = append(bals, params.BeaconConfig().MaxEffectiveBalance)
+	}
+	zeroHash := params.BeaconConfig().ZeroHash
+	mockblockRoots := make([][]byte, params.BeaconConfig().SlotsPerHistoricalRoot)
+	for i := range mockblockRoots {
+		mockblockRoots[i] = zeroHash[:]
+	}
+
+	mockstateRoots := make([][]byte, params.BeaconConfig().SlotsPerHistoricalRoot)
+	for i := range mockstateRoots {
+		mockstateRoots[i] = zeroHash[:]
+	}
+	mockrandaoMixes := make([][]byte, params.BeaconConfig().EpochsPerHistoricalVector)
+	for i := range mockrandaoMixes {
+		mockrandaoMixes[i] = zeroHash[:]
+	}
+	newState, err := InitializeFromProtoPhase0(&ethpb.BeaconState{
+		Slot:                  1,
+		GenesisValidatorsRoot: make([]byte, 32),
+		Fork: &ethpb.Fork{
+			PreviousVersion: make([]byte, 4),
+			CurrentVersion:  make([]byte, 4),
+			Epoch:           0,
+		},
+		LatestBlockHeader: &ethpb.BeaconBlockHeader{
+			ParentRoot: make([]byte, fieldparams.RootLength),
+			StateRoot:  make([]byte, fieldparams.RootLength),
+			BodyRoot:   make([]byte, fieldparams.RootLength),
+		},
+		Validators: vals,
+		Balances:   bals,
+		Eth1Data: &ethpb.Eth1Data{
+			DepositRoot: make([]byte, 32),
+			BlockHash:   make([]byte, 32),
+		},
+		BlockRoots:                  mockblockRoots,
+		StateRoots:                  mockstateRoots,
+		RandaoMixes:                 mockrandaoMixes,
+		JustificationBits:           bitfield.NewBitvector4(),
+		PreviousJustifiedCheckpoint: &ethpb.Checkpoint{Root: make([]byte, fieldparams.RootLength)},
+		CurrentJustifiedCheckpoint:  &ethpb.Checkpoint{Root: make([]byte, fieldparams.RootLength)},
+		FinalizedCheckpoint:         &ethpb.Checkpoint{Root: make([]byte, fieldparams.RootLength)},
+		Slashings:                   make([]uint64, params.BeaconConfig().EpochsPerSlashingsVector),
+	})
+	assert.NoError(t, err)
+	return newState
+}
+
+func EmptyStateFromVersion(t *testing.T, v int) state.BeaconState {
+	gen := generateState(t)
+	s, ok := gen.(*BeaconState)
+	if !ok {
+		t.Fatal("not a beacon state")
+	}
+	s.version = v
+	return s
+}
