@@ -18,6 +18,7 @@
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
+#include <mcl/mcl_log.hpp>
 
 
 namespace mcl {
@@ -640,11 +641,17 @@ public:
 		const size_t yn = y.size();
 		size_t zn = xn + yn;
 		bool b;
+		BN_LOG(" ");
 		z.buf_.alloc(&b, zn);
+		BN_LOG(" ");
 		assert(b); (void)b;
+		BN_LOG(" ");
 		bint::mulNM(&z.buf_[0], &x.buf_[0], xn, &y.buf_[0], yn);
+		BN_LOG(" ");
 		z.trim(zn);
+		BN_LOG(" ");
 		z.isNeg_ = x.isNeg_ ^ y.isNeg_;
+		BN_LOG(" ");
 	}
 	static void sqr(VintT& y, const VintT& x)
 	{

@@ -8,6 +8,7 @@
 */
 #include <mcl/op.hpp>
 #include <mcl/util.hpp>
+#include <mcl/mcl_log.hpp>
 #ifdef _MSC_VER
 	#ifndef MCL_FORCE_INLINE
 		#define MCL_FORCE_INLINE __forceinline
@@ -133,8 +134,8 @@ struct Operator : public E {
 	template<class S> MCL_FORCE_INLINE T& operator-=(const S& rhs) { T::sub(static_cast<T&>(*this), static_cast<const T&>(*this), rhs); return static_cast<T&>(*this); }
 	template<class S> friend MCL_FORCE_INLINE T operator+(const T& a, const S& b) { T c; T::add(c, a, b); return c; }
 	template<class S> friend MCL_FORCE_INLINE T operator-(const T& a, const S& b) { T c; T::sub(c, a, b); return c; }
-	template<class S> MCL_FORCE_INLINE T& operator*=(const S& rhs) { T::mul(static_cast<T&>(*this), static_cast<const T&>(*this), rhs); return static_cast<T&>(*this); }
-	template<class S> friend MCL_FORCE_INLINE T operator*(const T& a, const S& b) { T c; T::mul(c, a, b); return c; }
+	template<class S> MCL_FORCE_INLINE T& operator*=(const S& rhs) { BN_LOG(" ");T::mul(static_cast<T&>(*this), static_cast<const T&>(*this), rhs); BN_LOG(" ");return static_cast<T&>(*this); }
+	template<class S> friend MCL_FORCE_INLINE T operator*(const T& a, const S& b) { BN_LOG(" ");T c; BN_LOG(" ");T::mul(c, a, b);BN_LOG(" "); return c; }
 	MCL_FORCE_INLINE T& operator/=(const T& rhs) { T c; T::inv(c, rhs); T::mul(static_cast<T&>(*this), static_cast<const T&>(*this), c); return static_cast<T&>(*this); }
 	static MCL_FORCE_INLINE void div(T& c, const T& a, const T& b) { T t; T::inv(t, b); T::mul(c, a, t); }
 	friend MCL_FORCE_INLINE T operator/(const T& a, const T& b) { T c; T::inv(c, b); c *= a; return c; }

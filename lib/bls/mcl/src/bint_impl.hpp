@@ -4,6 +4,7 @@
 */
 
 #include <mcl/bint.hpp>
+#include <mcl/mcl_log.hpp>
 
 namespace mcl { namespace bint {
 
@@ -552,27 +553,48 @@ MCL_DLL_API size_t div(Unit *q, size_t qn, Unit *x, size_t xn, const Unit *y, si
 
 MCL_DLL_API void mulNM(Unit *z, const Unit *x, size_t xn, const Unit *y, size_t yn)
 {
+	BN_LOG(" ");
 	if (xn == 0 || yn == 0) return;
 	if (yn > xn) {
+		BN_LOG(" ");
 		fp::swap_(yn, xn);
+		BN_LOG(" ");
 		fp::swap_(x, y);
+		BN_LOG(" ");
 	}
+	BN_LOG(" ");
 	assert(xn >= yn);
+	BN_LOG(" ");
 	if (z == x) {
+		BN_LOG(" ");
 		Unit *p = (Unit*)CYBOZU_ALLOCA(sizeof(Unit) * xn);
+		BN_LOG(" ");
 		copyN(p, x, xn);
+		BN_LOG(" ");
 		x = p;
+		BN_LOG(" ");
 	}
+	BN_LOG(" ");
 	if (z == y) {
+		BN_LOG(" ");
 		Unit *p = (Unit*)CYBOZU_ALLOCA(sizeof(Unit) * yn);
+		BN_LOG(" ");
 		copyN(p, y, yn);
+		BN_LOG(" ");
 		y = p;
+		BN_LOG(" ");
 	}
+	BN_LOG(" ");
 	z[xn] = mulUnitN(z, x, y[0], xn);
+	BN_LOG(" ");
 	u_ppu mulUnitAdd = get_mulUnitAdd(xn);
+	BN_LOG(" ");
 	for (size_t i = 1; i < yn; i++) {
+		BN_LOG(" ");
 		z[xn + i] = mulUnitAdd(&z[i], x, y[i]);
+		BN_LOG(" ");
 	}
+	BN_LOG(" ");
 }
 
 /*

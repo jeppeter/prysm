@@ -17,6 +17,7 @@
 #include <mcl/randgen.hpp>
 #include <mcl/config.hpp>
 #include <mcl/conversion.hpp>
+#include <mcl/mcl_log.hpp>
 
 #ifdef _MSC_VER
 	#pragma warning(push)
@@ -102,11 +103,12 @@ inline void setStr(bool *pb, mpz_class& z, const char *str, int base = 0)
 inline size_t getStr(char *buf, size_t bufSize, const mpz_class& z, int base = 10)
 {
 #ifdef MCL_USE_VINT
-	return z.getStr(buf, bufSize, base);
+	size_t retval = z.getStr(buf, bufSize, base);
+	return retval;
 #else
 	__gmp_alloc_cstring tmp(mpz_get_str(0, base, z.get_mpz_t()));
 	size_t n = strlen(tmp.str);
-	if (n + 1 > bufSize) return 0;
+	if (n + 1 > bufSize) {return 0;}
 	memcpy(buf, tmp.str, n + 1);
 	return n;
 #endif
@@ -173,6 +175,7 @@ inline void sub(mpz_class& z, const mpz_class& x, const mpz_class& y)
 }
 inline void mul(mpz_class& z, const mpz_class& x, const mpz_class& y)
 {
+
 #ifdef MCL_USE_VINT
 	Vint::mul(z, x, y);
 #else
@@ -263,7 +266,7 @@ template<class T>
 void subMod(mpz_class& z, const mpz_class& x, const T& y, const mpz_class& m)
 {
 	sub(z, x, y);
-	if (!isNegative(z)) return;
+	if (!isNegative(z)) {return;}
 	add(z, z, m);
 }
 template<class T>

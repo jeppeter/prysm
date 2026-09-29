@@ -11,6 +11,9 @@
 #include <mcl/fp_tower.hpp>
 #include <mcl/ec.hpp>
 #include <mcl/curve_type.h>
+#include <mcl/mcl_log.hpp>
+
+
 namespace mcl { namespace local {
 
 // to export fast cofactor multiplication to mapto_wb19
@@ -513,17 +516,23 @@ struct MapTo {
 	*/
 	void init(const mpz_class& cofactor, const mpz_class &z, int curveType)
 	{
+		BN_LOG(" ");
 		if (0 <= curveType && curveType < MCL_EC_BEGIN) {
 			type_ = (curveType == MCL_BLS12_381 || curveType == MCL_BLS12_377 || curveType == MCL_BLS12_461) ? BLS12type : BNtype;
 		} else {
 			type_ = STD_ECtype;
 		}
+		BN_LOG(" ");
 		setMapToMode(MCL_MAP_TO_MODE_ORIGINAL);
+		BN_LOG(" ");
 		if (type_ == BNtype) {
+			BN_LOG(" ");
 			initBN(cofactor, z, curveType);
 		} else if (type_ == BLS12type) {
+			BN_LOG(" ");
 			initBLS12(z, curveType);
 		}
+		BN_LOG(" ");
 	}
 	template<class G, class F>
 	bool mapToEc(G& P, const F& t) const
@@ -697,12 +706,18 @@ struct GLV2T {
 	static bool isBLS12;
 	static void init(const mpz_class& z, bool isBLS12 = false)
 	{
+		BN_LOG(" ");
 		const mpz_class& r = Fr::getOp().mp;
+		BN_LOG(" ");
 		GLV2::z = z;
 		GLV2::abs_z = z < 0 ? -z : z;
+		BN_LOG(" ");
 		GLV2::isBLS12 = isBLS12;
+		BN_LOG(" ");
 		rBitSize = Fr::getOp().bitSize;
+		BN_LOG(" ");
 		rBitSize = (rBitSize + mcl::UnitBitSize - 1) & ~(mcl::UnitBitSize - 1);// a little better size
+		BN_LOG(" ");
 		mpz_class z2p1 = z * 2 + 1;
 		B[0][0] = z + 1;
 		B[0][1] = z;
@@ -720,13 +735,17 @@ struct GLV2T {
 		B[3][1] = 2 * z2p1;
 		B[3][2] =  -2 * z + 1;
 		B[3][3] = z - 1;
+		BN_LOG(" ");
 		/*
 			v[] = [r 0 0 0] * B^(-1) = [2z^2+3z+1, 12z^3+8z^2+z, 6z^3+4z^2+z, -(2z+1)]
 		*/
 		const char *zBN254 = "-4080000000000001";
+		BN_LOG(" ");
 		mpz_class t;
 		bool b;
+		BN_LOG(" ");
 		mcl::gmp::setStr(&b, t, zBN254, 16);
+		BN_LOG(" ");
 		assert(b);
 		(void)b;
 		if (z == t) {
@@ -736,17 +755,21 @@ struct GLV2T {
 				"-a957fab5402a55fced3aed96d1eb44295f40f136ee84e09b",
 				"-e00a8e7f56e007e929d7b2667ea6f29c",
 			};
+			BN_LOG(" ");
 			for (int i = 0; i < 4; i++) {
 				mcl::gmp::setStr(&b, v[i], vTblBN254[i], 16);
 				assert(b);
 				(void)b;
 			}
+			BN_LOG(" ");
 		} else {
+			BN_LOG(" ");
 			v[0] = ((1 + z * (3 + z * 2)) << rBitSize) / r;
 			v[1] = ((z * (1 + z * (8 + z * 12))) << rBitSize) / r;
 			v[2] = ((z * (1 + z * (4 + z * 6))) << rBitSize) / r;
 			v[3] = -((z * (1 + z * 2)) << rBitSize) / r;
 		}
+		BN_LOG(" ");
 	}
 	/*
 		u[] = [x, 0, 0, 0] - v[] * x * B
@@ -840,8 +863,11 @@ struct Param {
 
 	void init(bool *pb, const mcl::CurveParam& cp, fp::Mode mode)
 	{
+		BN_LOG(" ");
 		bint::initBint();
+		BN_LOG(" ");
 		this->cp = cp;
+		BN_LOG(" ");
 		isBLS12 = (cp.curveType == MCL_BLS12_381 || cp.curveType == MCL_BLS12_377 || cp.curveType == MCL_BLS12_461);
 #ifdef MCL_STATIC_CODE
 		if (!isBLS12) {
@@ -849,67 +875,114 @@ struct Param {
 			return;
 		}
 #endif
+		BN_LOG(" ");
 		gmp::setStr(pb, z, cp.z);
+		BN_LOG(" ");
 		if (!*pb) return;
+		BN_LOG(" ");
 		isNegative = z < 0;
+		BN_LOG(" ");
 		if (isNegative) {
+			BN_LOG(" ");
 			abs_z = -z;
 		} else {
+			BN_LOG(" ");
 			abs_z = z;
 		}
+		BN_LOG(" ");
 		if (isBLS12) {
-			mpz_class z2 = z * z;
+			BN_LOG(" ");
+			BN_LOG(" ");
+			//mpz_class z2 = z * z;
+			mpz_class z2;
+			mcl::gmp::mul(z2,z,z);
+			BN_LOG(" ");
 			mpz_class z4 = z2 * z2;
+			BN_LOG(" ");
 			r = z4 - z2 + 1;
+			BN_LOG(" ");
 			p = z - 1;
+			BN_LOG(" ");
 			p = p * p * r / 3 + z;
+			BN_LOG(" ");
 		} else {
+			BN_LOG(" ");
 			const int pCoff[] = { 1, 6, 24, 36, 36 };
 			const int rCoff[] = { 1, 6, 18, 36, 36 };
+			BN_LOG(" ");
 			p = local::evalPoly(z, pCoff);
+			BN_LOG(" ");
 			assert((p % 6) == 1);
 			r = local::evalPoly(z, rCoff);
+			BN_LOG(" ");
 		}
+		BN_LOG(" ");
 		Fr::init(pb, r, mode);
+		BN_LOG(" ");
 		if (!*pb) return;
+		BN_LOG(" ");
 		Fp::init(pb, cp.xi_a, p, mode);
+		BN_LOG(" ");
 		if (!*pb) return;
+		BN_LOG(" ");
 #ifdef MCL_DUMP_JIT
+		BN_LOG(" ");
 		*pb = true;
 		return;
 #endif
+		BN_LOG(" ");
 		Fp2::init(pb);
+		BN_LOG(" ");
 		if (!*pb) return;
+		BN_LOG(" ");
 		const Fp2 xi(cp.xi_a, 1);
+		BN_LOG(" ");
 		g2 = Fp2::get_gTbl()[0];
+		BN_LOG(" ");
 		g3 = Fp2::get_gTbl()[3];
+		BN_LOG(" ");
 		if (cp.isMtype) {
+			BN_LOG(" ");
 			Fp2::inv(g2, g2);
 			Fp2::inv(g3, g3);
 		}
+		BN_LOG(" ");
 		if (cp.isMtype) {
+			BN_LOG(" ");
 			twist_b = Fp2(cp.b) * xi;
 		} else {
+			BN_LOG(" ");
 			if (cp.b == 2 && cp.xi_a == 1) {
 				twist_b = Fp2(1, -1); // shortcut
 			} else {
 				twist_b = Fp2(cp.b) / xi;
 			}
 		}
+		BN_LOG(" ");
 		if (twist_b == Fp2(1, -1)) {
+			BN_LOG(" ");
 			twist_b_type = tb_1m1i;
 		} else if (twist_b == Fp2(1, -2)) {
+			BN_LOG(" ");
 			twist_b_type = tb_1m2i;
 		} else {
+			BN_LOG(" ");
 			twist_b_type = tb_generic;
 		}
+		BN_LOG(" ");
 		G1::init(0, cp.b, mcl::ec::Jacobi);
+		BN_LOG(" ");
 		G2::init(0, twist_b, mcl::ec::Jacobi);
+		BN_LOG(" ");
 
 		const mpz_class largest_c = isBLS12 ? abs_z : gmp::abs(z * 6 + 2);
+		BN_LOG(" ");
 		useNAF = gmp::getNAF(siTbl, largest_c);
+		BN_LOG(" ");
 		precomputedQcoeffSize = local::getPrecomputeQcoeffSize(siTbl);
+		BN_LOG(" ");
 		gmp::getNAF(zReplTbl, gmp::abs(z));
+		BN_LOG(" ");
 /*
 		if (isBLS12) {
 			mpz_class z2 = z * z;
@@ -926,17 +999,27 @@ struct Param {
 			exp_c2 = 6 * z * z + 1;
 		}
 */
+		BN_LOG(" ");
 		if (isBLS12) {
+			BN_LOG(" ");
 			mapTo.init(0, z, cp.curveType);
 		} else {
+			BN_LOG(" ");
 			mapTo.init(2 * p - r, z, cp.curveType);
 		}
+		BN_LOG(" ");
 		GLV1::initForBN(z, isBLS12, cp.curveType);
+		BN_LOG(" ");
 		GLV2T<Fr>::init(z, isBLS12);
+		BN_LOG(" ");
 		basePoint.clear();
+		BN_LOG(" ");
 		G1::setOrder(r);
+		BN_LOG(" ");
 		G2::setOrder(r);
+		BN_LOG(" ");
 		*pb = true;
+		BN_LOG(" ");
 	}
 	void initG1only(bool *pb, const mcl::EcParam& para)
 	{

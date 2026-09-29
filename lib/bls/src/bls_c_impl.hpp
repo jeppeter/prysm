@@ -87,49 +87,82 @@ int blsSetMapToMode(int mode)
 	return mclBn_setMapToMode(mode);
 }
 
+const char* st_write_error_msg = "compiledTimeVar error\n";
+const char* st_note_init_msg = "blsInit function\n";
+const char* st_succ_compare_msg = "succ compare var\n";
+
+#define INIT_LOG(...)  do{fprintf(stderr,"[%s:%d] ",__FILE__,__LINE__); fprintf(stderr,__VA_ARGS__);fprintf(stderr,"\n");fflush(stderr);} while(0)
+
 int blsInit(int curve, int compiledTimeVar)
 {
 	if (compiledTimeVar != MCLBN_COMPILED_TIME_VAR) {
-		fprintf(stderr,"compiledTimeVar %d MCLBN_COMPILED_TIME_VAR %d\n",compiledTimeVar,MCLBN_COMPILED_TIME_VAR);
+		//fprintf(stderr,"compiledTimeVar %d MCLBN_COMPILED_TIME_VAR %d\n",compiledTimeVar,MCLBN_COMPILED_TIME_VAR);
+		INIT_LOG("compiledTimeVar %d MCLBN_COMPILED_TIME_VAR %d",compiledTimeVar,MCLBN_COMPILED_TIME_VAR);		
 		return -(compiledTimeVar + (MCLBN_COMPILED_TIME_VAR * 1000));
 	}
 	const mcl::CurveParam* cp = mcl::getCurveParam(curve);
 	if (cp == 0) return -1;
+	INIT_LOG(" ");
 	bool b;
 	initPairing(&b, *cp);
+	INIT_LOG(" ");
 #ifdef __wasm__
 //	G2::setMulArrayGLV(0);
 #endif
+	INIT_LOG(" ");
 	if (!b) return -1;
+	INIT_LOG(" ");
 	g_curveType = curve;
+	INIT_LOG(" ");
 
 #ifdef BLS_ETH
+	INIT_LOG(" ");
 	if (curve == MCL_BLS12_381) {
+		INIT_LOG(" ");
 		mclBn_setETHserialization(1);
+		INIT_LOG(" ");
 		g_P.setStr(&b, "1 3685416753713387016781088315183077757961620795782546409894578378688607592378376318836054947676345821548104185464507 1339506544944476473020471379941921221584933875938349620426543736416511423956333506472724655353366534992391756441569", 10);
+		INIT_LOG(" ");
 		mclBn_setMapToMode(MCL_MAP_TO_MODE_HASH_TO_CURVE_07);
+		INIT_LOG(" ");
 		blsSetETHmode(BLS_ETH_MODE_LATEST);
+		INIT_LOG(" ");
 	} else
 	{
+		INIT_LOG(" ");
 		mapToG1(&b, g_P, 1);
+		INIT_LOG(" ");
 	}
 #else
-
+	INIT_LOG(" ");
 	if (curve == MCL_BN254) {
 		const char *Qx_BN254 = "11ccb44e77ac2c5dc32a6009594dbe331ec85a61290d6bbac8cc7ebb2dceb128 f204a14bbdac4a05be9a25176de827f2e60085668becdd4fc5fa914c9ee0d9a";
 		const char *Qy_BN254 = "7c13d8487903ee3c1c5ea327a3a52b6cc74796b1760d5ba20ed802624ed19c8 8f9642bbaacb73d8c89492528f58932f2de9ac3e80c7b0e41f1a84f1c40182";
+		INIT_LOG(" ");
 		g_Q.x.setStr(&b, Qx_BN254, 16);
+		INIT_LOG(" ");
 		g_Q.y.setStr(&b, Qy_BN254, 16);
+		INIT_LOG(" ");
 		g_Q.z = 1;
+		INIT_LOG(" ");
 	} else {
+		INIT_LOG(" ");
 		mapToG2(&b, g_Q, 1);
+		INIT_LOG(" ");
 	}
+	INIT_LOG(" ");
 	if (!b) return -100;
+	INIT_LOG(" ");
 #if MCL_SIZEOF_UNIT == 8
+	INIT_LOG(" ");
 	if (curve == MCL_BN254) {
+		INIT_LOG(" ");
 		#include "./qcoeff-bn254.hpp"
+		INIT_LOG(" ");
 		g_Qcoeff.resize(BN::param.precomputedQcoeffSize);
+		INIT_LOG(" ");
 		assert(g_Qcoeff.size() == CYBOZU_NUM_OF_ARRAY(QcoeffTblBN254));
+		INIT_LOG(" ");
 		for (size_t i = 0; i < g_Qcoeff.size(); i++) {
 			Fp6& x6 = g_Qcoeff[i];
 			for (size_t j = 0; j < 6; j++) {
@@ -140,15 +173,22 @@ int blsInit(int curve, int compiledTimeVar)
 				}
 			}
 		}
+		INIT_LOG(" ");
 	} else
 #endif
 	{
+		INIT_LOG(" ");
 		precomputeG2(&b, g_Qcoeff, getBasePoint());
+		INIT_LOG(" ");
 	}
 #endif
+	INIT_LOG(" ");
 	if (!b) return -101;
+	INIT_LOG(" ");
 	verifyOrderG1(true);
+	INIT_LOG(" ");
 	verifyOrderG2(true);
+	INIT_LOG(" ");
 	return 0;
 }
 
