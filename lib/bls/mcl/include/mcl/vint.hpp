@@ -647,6 +647,9 @@ public:
 		assert(b); (void)b;
 		BN_LOG(" ");
 		bint::mulNM(&z.buf_[0], &x.buf_[0], xn, &y.buf_[0], yn);
+		BN_BUFFER_LOG(&z.buf_[0],sizeof(z.buf_[0]) * zn, "z buffer");
+		BN_BUFFER_LOG(&x.buf_[0],sizeof(x.buf_[0]) * xn, "x buffer");
+		BN_BUFFER_LOG(&y.buf_[0],sizeof(y.buf_[0]) * yn, "y buffer");
 		BN_LOG(" ");
 		z.trim(zn);
 		BN_LOG(" ");

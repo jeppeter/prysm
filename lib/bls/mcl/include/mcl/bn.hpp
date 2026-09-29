@@ -12,6 +12,7 @@
 #include <mcl/ec.hpp>
 #include <mcl/curve_type.h>
 #include <mcl/mcl_log.hpp>
+#include <string>
 
 
 namespace mcl { namespace local {
@@ -875,9 +876,12 @@ struct Param {
 			return;
 		}
 #endif
-		BN_LOG(" ");
+		std::string nstr;
+		BN_LOG("");
 		gmp::setStr(pb, z, cp.z);
-		BN_LOG(" ");
+		nstr.resize(200);
+		mcl::gmp::getStr((char*)(nstr.data()),200,z,16);
+		BN_LOG("z 0x%s",nstr.c_str());
 		if (!*pb) return;
 		BN_LOG(" ");
 		isNegative = z < 0;
@@ -892,31 +896,46 @@ struct Param {
 		BN_LOG(" ");
 		if (isBLS12) {
 			BN_LOG(" ");
-			BN_LOG(" ");
-			//mpz_class z2 = z * z;
-			mpz_class z2;
-			mcl::gmp::mul(z2,z,z);
-			BN_LOG(" ");
+			mpz_class z2 = z * z;
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,z2,16);
+			BN_LOG("z2 0x%s",nstr.c_str());
 			mpz_class z4 = z2 * z2;
-			BN_LOG(" ");
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,z4,16);
+			BN_LOG("z4 0x%s",nstr.c_str());
 			r = z4 - z2 + 1;
-			BN_LOG(" ");
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,r,16);
+			BN_LOG("r 0x%s",nstr.c_str());
 			p = z - 1;
-			BN_LOG(" ");
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,p,16);
+			BN_LOG("p 0x%s",nstr.c_str());
 			p = p * p * r / 3 + z;
-			BN_LOG(" ");
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,p,16);
+			BN_LOG("p 0x%s",nstr.c_str());
 		} else {
 			BN_LOG(" ");
 			const int pCoff[] = { 1, 6, 24, 36, 36 };
 			const int rCoff[] = { 1, 6, 18, 36, 36 };
-			BN_LOG(" ");
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,z,16);
+			BN_LOG("z 0x%s",nstr.c_str());
 			p = local::evalPoly(z, pCoff);
-			BN_LOG(" ");
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,p,16);
+			BN_LOG("p 0x%s", nstr.c_str());
 			assert((p % 6) == 1);
 			r = local::evalPoly(z, rCoff);
-			BN_LOG(" ");
+			nstr.resize(200);
+			mcl::gmp::getStr((char*)(nstr.data()),200,r,16);
+			BN_LOG("r 0x%s",nstr.c_str());
 		}
-		BN_LOG(" ");
+		nstr.resize(200);
+		mcl::gmp::getStr((char*)(nstr.data()),200,r,16);
+		BN_LOG("r 0x%s",nstr.c_str());
 		Fr::init(pb, r, mode);
 		BN_LOG(" ");
 		if (!*pb) return;

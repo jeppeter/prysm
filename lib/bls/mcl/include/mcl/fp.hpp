@@ -30,6 +30,7 @@
 #include <mcl/util.hpp>
 #include <mcl/operator.hpp>
 #include <mcl/conversion.hpp>
+#include <mcl/mcl_log.hpp>
 
 namespace mcl {
 
@@ -154,27 +155,47 @@ public:
 	*/
 	static inline void init(bool *pb, int xi_a, const mpz_class& p, fp::Mode mode = fp::FP_AUTO)
 	{
+		BN_LOG(" ");
 		assert(maxBitSize <= MCL_MAX_BIT_SIZE);
+		BN_LOG("op_.init %p",&op_.init);
 		*pb = op_.init(p, maxBitSize, xi_a, mode);
+		BN_LOG(" ");
 #ifdef MCL_DUMP_JIT
+		BN_LOG(" ");
 		return;
 #endif
+		BN_LOG(" ");
 		if (!*pb) return;
+		BN_LOG(" ");
 		{ // set oneRep
+			BN_LOG(" ");
 			FpT& one = *reinterpret_cast<FpT*>(op_.oneRep);
+			BN_LOG(" ");
 			one.clear();
+			BN_LOG(" ");
 			one.v_[0] = 1;
+			BN_LOG(" ");
 			one.toMont();
+			BN_LOG(" ");
 		}
 		{ // set half
+			BN_LOG(" ");
 			mpz_class half = (op_.mp + 1) / 2;
+			BN_LOG(" ");
 			gmp::getArray(pb, op_.half, op_.N, half);
+			BN_LOG(" ");
 			if (!*pb) return;
+			BN_LOG(" ");
 		}
+		BN_LOG(" ");
 		inv(inv2_, 2);
+		BN_LOG(" ");
 		ioMode_ = 0;
+		BN_LOG(" ");
 		isETHserialization_ = false;
+		BN_LOG(" ");
 #ifdef MCL_XBYAK_DIRECT_CALL
+		BN_LOG(" ");
 		if (op_.fp_addA_ == 0) {
 			op_.fp_addA_ = addA;
 		}
@@ -197,18 +218,26 @@ public:
 			op_.fp_mul9A_ = mul9A;
 		}
 #endif
+		BN_LOG(" ");
 		*pb = true;
 	}
 	static inline void init(bool *pb, const mpz_class& p, fp::Mode mode = fp::FP_AUTO)
 	{
+		BN_LOG(" ");
 		init(pb, 0, p, mode);
+		BN_LOG(" ");
 	}
 	static inline void init(bool *pb, const char *mstr, fp::Mode mode = fp::FP_AUTO)
 	{
+		BN_LOG(" ");
 		mpz_class p;
+		BN_LOG(" ");
 		gmp::setStr(pb, p, mstr);
+		BN_LOG(" ");
 		if (!*pb) return;
+		BN_LOG(" ");
 		init(pb, p, mode);
+		BN_LOG(" ");
 	}
 	static inline size_t getModulo(char *buf, size_t bufSize)
 	{

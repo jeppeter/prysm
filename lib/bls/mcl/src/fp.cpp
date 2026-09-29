@@ -6,6 +6,7 @@
 #include <cybozu/sha2.hpp>
 #include <cybozu/endian.hpp>
 #include <mcl/conversion.hpp>
+#include <mcl/mcl_log.hpp>
 
 #if defined(MCL_STATIC_CODE) || defined(MCL_USE_XBYAK) || (defined(MCL_USE_LLVM) && (CYBOZU_HOST == CYBOZU_HOST_INTEL)) || (MCL_BINT_ASM_X64 == 1)
 
@@ -407,37 +408,60 @@ static bool initForMont(Op& op, const Unit *p, Mode mode)
 
 bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size_t mclMaxBitSize)
 {
+	BN_LOG(" ");
 	if (mclMaxBitSize != MCL_MAX_BIT_SIZE) return false;
+	BN_LOG(" ");
 	if (maxBitSize > MCL_MAX_BIT_SIZE) return false;
+	BN_LOG(" ");
 	if (_p <= 0) return false;
+	BN_LOG(" ");
 	bint::initBint();
+	BN_LOG(" ");
 	clear();
+	BN_LOG(" ");
 	maxN = (maxBitSize + UnitBitSize - 1) / UnitBitSize;
+	BN_LOG(" ");
 	N = gmp::getUnitSize(_p);
+	std::string ps;
+	ps.resize(200);
+	mcl::gmp::getStr((char*)(ps.data()),200,_p,16);
+	BN_LOG("_p 0x%s",ps.c_str());
 	if (N > maxN) return false;
+	BN_LOG(" ");
 	{
 		bool b;
+		BN_LOG(" ");
 		gmp::getArray(&b, p, N, _p);
+		BN_LOG(" ");
 		if (!b) return false;
+		BN_LOG(" ");
 	}
+	BN_LOG(" ");
 	mp = _p;
+	BN_LOG(" ");
 	bitSize = gmp::getBitSize(mp);
+	BN_LOG(" ");
 	pmod4 = gmp::getUnit(mp, 0) % 4;
+	BN_LOG(" ");
 	this->xi_a = _xi_a;
+	BN_LOG(" ");
 /*
 	priority : MCL_USE_XBYAK > MCL_USE_LLVM > none
 	Xbyak > llvm_mont > llvm > gmp_mont > gmp
 */
 #ifdef MCL_X64_ASM
+	BN_LOG(" ");
 	if (mode == FP_AUTO) mode = FP_XBYAK;
 	if (mode == FP_XBYAK && bitSize > 384) {
 		mode = FP_AUTO;
 	}
 #ifdef MCL_USE_XBYAK
+	BN_LOG(" ");
 	if (!isEnableJIT()) {
 		mode = FP_AUTO;
 	}
 #elif defined(MCL_STATIC_CODE)
+	BN_LOG(" ");
 	{
 		// static jit code uses avx, mulx, adox, adcx
 		using namespace Xbyak::util;
@@ -447,6 +471,7 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size
 	}
 #endif
 #else
+	BN_LOG(" ");
 	if (mode == FP_XBYAK) mode = FP_AUTO;
 #endif
 #ifdef MCL_USE_LLVM
@@ -454,12 +479,16 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size
 #else
 	if (mode == FP_LLVM || mode == FP_LLVM_MONT) mode = FP_AUTO;
 #endif
+	BN_LOG(" ");
 	if (mode == FP_AUTO) mode = FP_GMP_MONT;
+	BN_LOG(" ");
 	isMont = mode == FP_GMP_MONT || mode == FP_LLVM_MONT || mode == FP_XBYAK;
 	isFullBit = (bitSize % UnitBitSize) == 0;
 	isLtQuad = bitSize <= N * UnitBitSize - 2;
+	BN_LOG(" ");
 
 #if defined(MCL_USE_LLVM) || defined(MCL_USE_XBYAK)
+	BN_LOG(" ");
 	if (mode == FP_AUTO || mode == FP_LLVM || mode == FP_XBYAK) {
 		const struct {
 			PrimeMode mode;
@@ -483,7 +512,9 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size
 			}
 		}
 	}
+	BN_LOG(" ");
 #endif
+	BN_LOG(" ");
 	if (mode == FP_XBYAK || mode != FP_LLVM) {
 		const char *secp256k1Str = "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f";
 		bool b;
@@ -495,6 +526,7 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size
 			isFastMod = true;
 		}
 	}
+	BN_LOG("N %d MCL_SIZEOF_UNIT %d",N,MCL_SIZEOF_UNIT);
 	switch (N) {
 	case 128/(MCL_SIZEOF_UNIT * 8):  setOp<128/(MCL_SIZEOF_UNIT * 8)>(*this); break;
 	case 192/(MCL_SIZEOF_UNIT * 8):  setOp<192/(MCL_SIZEOF_UNIT * 8)>(*this); break;
@@ -518,8 +550,10 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size
 	case 576/(MCL_SIZEOF_UNIT * 8):  setOp<576/(MCL_SIZEOF_UNIT * 8)>(*this); break;
 #endif
 	default:
+		BN_LOG(" ");
 		return false;
 	}
+	BN_LOG(" ");
 #ifdef MCL_USE_LLVM
 	if (primeMode == PM_NIST_P192) {
 		fp_mul = &mcl_fp_mulNIST_P192L;
@@ -537,18 +571,26 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size
 		fp_sqr = &bint::sqr_SECP256K1;
 		fpDbl_mod = &bint::mod_SECP256K1;
 	}
+	BN_LOG(" ");
 	if (N * UnitBitSize <= 256) {
 		hash = sha256;
 	} else {
 		hash = sha512;
 	}
+	BN_LOG(" ");
 	{
 		bool b;
+		BN_LOG(" ");
 		sq.set(&b, mp);
+		BN_LOG(" ");
 		if (!b) return false;
+		BN_LOG(" ");
 	}
+	BN_LOG(" ");
 	modp.init(mp);
+	BN_LOG(" ");
 	smallModp.init(mp);
+	BN_LOG(" ");
 	return fp::initForMont(*this, p, mode);
 }
 
