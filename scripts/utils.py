@@ -37,11 +37,14 @@ def load_base_parser(parser):
         "goarch" : null,
         "rpcpipe" : null,
         "reserved|R" : false,
-        "networkid" : 2363
+        "networkid" : 2363,
+        "compile<%s.compile_handler>##bins ... to compile bins now support is %s ##" : {
+            "$" : "+"
+        }
     }
     '''
 
-    commandline = commandline_fmt
+    commandline = commandline_fmt%(__name__,support_targets)
     parser.load_command_line_string(commandline)
     return parser
 
