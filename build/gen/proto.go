@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -67,7 +68,16 @@ func genProto() error {
 	if err != nil {
 		return fmt.Errorf("mkdirTemp: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(tmpRoot) }()
+	defer func() {
+		var c string
+		c = os.Getenv("NOT_REMOVE_TEMP")
+		if len(c) == 0 {
+			_ = os.RemoveAll(tmpRoot)
+		} else {
+			fmt.Fprintf(os.Stderr, "tmpRoot %s\n", tmpRoot)
+		}
+
+	}()
 
 	googleapisInc, err := fetchGoogleapis(filepath.Join(tmpRoot, "googleapis"))
 	if err != nil {
@@ -221,26 +231,41 @@ func fetchGoogleapis(dest string) (string, error) {
 }
 
 func downloadVerified(url, wantSHA256 string) ([]byte, error) {
-	resp, err := http.Get(url) // #nosec G107 -- url is built from the pinned googleapis commit constant
-	if err != nil {
-		return nil, fmt.Errorf("http get: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	var outfile string
+	outfile = os.Getenv("GOOGLE_API_FILE")
+	if len(outfile) > 0 {
+		data, err := os.ReadFile(outfile)
+		if err != nil {
+			return nil, fmt.Errorf("readAll: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http get %s: %s", url, resp.Status)
-	}
+		if sum := fmt.Sprintf("%x", sha256.Sum256(data)); sum != wantSHA256 {
+			return nil, fmt.Errorf("sha256 mismatch for %s: got %s, want %s", url, sum, wantSHA256)
+		}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("readAll: %w", err)
-	}
+		return data, nil
+	} else {
+		resp, err := http.Get(url) // #nosec G107 -- url is built from the pinned googleapis commit constant
+		if err != nil {
+			return nil, fmt.Errorf("http get: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
 
-	if sum := fmt.Sprintf("%x", sha256.Sum256(data)); sum != wantSHA256 {
-		return nil, fmt.Errorf("sha256 mismatch for %s: got %s, want %s", url, sum, wantSHA256)
-	}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("http get %s: %s", url, resp.Status)
+		}
 
-	return data, nil
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("readAll: %w", err)
+		}
+
+		if sum := fmt.Sprintf("%x", sha256.Sum256(data)); sum != wantSHA256 {
+			return nil, fmt.Errorf("sha256 mismatch for %s: got %s, want %s", url, sum, wantSHA256)
+		}
+
+		return data, nil
+	}
 }
 
 func extractZipFile(f *zip.File, destDir, rel string) error {
@@ -272,7 +297,15 @@ func generateNetwork(dict map[string]string, outDir, binDir, googleapisInc strin
 	if err != nil {
 		return fmt.Errorf("mkdirTemp: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
+	defer func() {
+		var c string
+		c = os.Getenv("NOT_REMOVE_TEMP")
+		if len(c) == 0 {
+			_ = os.RemoveAll(tmp)
+		} else {
+			fmt.Fprintf(os.Stderr, "tmp %s\n", tmp)
+		}
+	}()
 
 	stage := filepath.Join(tmp, "stage")
 	if err := stageProtos(stage, dict); err != nil {
@@ -380,6 +413,8 @@ func runPlugin(plugin string, req *pluginpb.CodeGeneratorRequest, outDir string)
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
+	//fmt.Fprintf(os.Stderr, "in\n%s", string(in))
+
 	cmd := exec.Command(plugin) // #nosec G204 -- plugin is a path under our own temp bin dir
 	cmd.Stdin = bytes.NewReader(in)
 
@@ -433,17 +468,26 @@ func writeTagged(tag, src, dst string) error {
 }
 
 func pluginForMode(mode, binDir, baseOpt string) (plugin, param string, err error) {
-	castPlugin := filepath.Join(binDir, "protoc-gen-go-cast")
+	castPlugin := filepath.Join(binDir, exeFile("protoc-gen-go-cast"))
 	switch mode {
 	case modeCast:
 		return castPlugin, baseOpt, nil
 	case modeCastGRPC:
 		return castPlugin, baseOpt + ",plugins=grpc", nil
 	case modeStock:
-		return filepath.Join(binDir, "protoc-gen-go"), baseOpt, nil
+		return filepath.Join(binDir, exeFile("protoc-gen-go")), baseOpt, nil
 	default:
 		return "", "", fmt.Errorf("unknown proto plugin mode %q", mode)
 	}
+}
+
+func exeFile(filename string) string {
+	var retname string = filename
+
+	if runtime.GOOS == "windows" {
+		retname += ".exe"
+	}
+	return retname
 }
 
 func buildProtoPlugins(tmpRoot string) (string, error) {
@@ -464,11 +508,11 @@ func buildProtoPlugins(tmpRoot string) (string, error) {
 
 	fmt.Printf("building protoc-gen-go-cast + protoc-gen-go against protobuf-go %s\n", protobufGoVer)
 	env := []string{"GOFLAGS=-mod=mod"}
-	if err := shInDir(pluginMod, env, "go", "build", "-o", filepath.Join(binDir, "protoc-gen-go-cast"), "github.com/prysmaticlabs/protoc-gen-go-cast"); err != nil {
+	if err := shInDir(pluginMod, env, "go", "build", "-o", filepath.Join(binDir, exeFile("protoc-gen-go-cast")), "github.com/prysmaticlabs/protoc-gen-go-cast"); err != nil {
 		return "", fmt.Errorf("shInDir: %w", err)
 	}
 
-	if err := shInDir(pluginMod, env, "go", "build", "-o", filepath.Join(binDir, "protoc-gen-go"), "google.golang.org/protobuf/cmd/protoc-gen-go"); err != nil {
+	if err := shInDir(pluginMod, env, "go", "build", "-o", filepath.Join(binDir, exeFile("protoc-gen-go")), "google.golang.org/protobuf/cmd/protoc-gen-go"); err != nil {
 		return "", fmt.Errorf("shInDir: %w", err)
 	}
 
