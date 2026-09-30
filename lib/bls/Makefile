@@ -202,6 +202,7 @@ ifneq ($(MIN_WITH_XBYAK),1)
 endif
 ifeq ($(BLS_ETH),1)
   MIN_CFLAGS+=-DBLS_ETH
+  MIN_CFLAGS+=-I/usr/include/c++/15/ -I/usr/include/x86_64-linux-gnu/c++/15/
 endif
 minimized_static:
 	$(CXX) -c -o $(OBJ_DIR)/fp.o $(MCL_DIR)/src/fp.cpp $(MIN_CFLAGS)
@@ -215,6 +216,9 @@ endif
 
 $(EXE_DIR)/minimized_static_test.exe: minimized_static
 	$(CXX) -o $@ test/bls_c384_256_test.cpp $(LIB_DIR)/libbls384_256.a -DMCL_MAX_BIT_SIZE=384 -I ./include -I $(MCL_DIR)/include -DNDEBUG
+
+test.elf:minimized_static
+	$(CXX) -o $@ main.cpp $(LIB_DIR)/libbls384_256.a -DMCL_MAX_BIT_SIZE=384 -I ./include -I $(MCL_DIR)/include -DNDEBUG -DBLS_ETH
 
 minimized_static_test: $(EXE_DIR)/minimized_static_test.exe
 	$(EXE_DIR)/minimized_static_test.exe

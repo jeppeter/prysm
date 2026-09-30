@@ -157,7 +157,7 @@ public:
 	{
 		BN_LOG(" ");
 		assert(maxBitSize <= MCL_MAX_BIT_SIZE);
-		BN_LOG("op_.init %p",&op_.init);
+		//BN_LOG("op_.init %p",&op_.init);
 		*pb = op_.init(p, maxBitSize, xi_a, mode);
 		BN_LOG(" ");
 #ifdef MCL_DUMP_JIT

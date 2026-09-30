@@ -7,6 +7,8 @@
 #include <cybozu/endian.hpp>
 #include <mcl/conversion.hpp>
 #include <mcl/mcl_log.hpp>
+#include <string>
+
 
 #if defined(MCL_STATIC_CODE) || defined(MCL_USE_XBYAK) || (defined(MCL_USE_LLVM) && (CYBOZU_HOST == CYBOZU_HOST_INTEL)) || (MCL_BINT_ASM_X64 == 1)
 
@@ -526,7 +528,7 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, int _xi_a, Mode mode, size
 			isFastMod = true;
 		}
 	}
-	BN_LOG("N %d MCL_SIZEOF_UNIT %d",N,MCL_SIZEOF_UNIT);
+	BN_LOG("N %d MCL_SIZEOF_UNIT %d",(int)N,(int)MCL_SIZEOF_UNIT);
 	switch (N) {
 	case 128/(MCL_SIZEOF_UNIT * 8):  setOp<128/(MCL_SIZEOF_UNIT * 8)>(*this); break;
 	case 192/(MCL_SIZEOF_UNIT * 8):  setOp<192/(MCL_SIZEOF_UNIT * 8)>(*this); break;

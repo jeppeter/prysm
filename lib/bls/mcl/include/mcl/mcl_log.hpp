@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-
+#if 0
 #define BN_LOG(...) do{fprintf(stderr,"[%s:%d] ",__FILE__,__LINE__); fprintf(stderr,__VA_ARGS__);fprintf(stderr,"\n");fflush(stderr);} while(0)
 #define BN_BUFFER_LOG(ptr,size,...)                                                               \
 do{                                                                                               \
@@ -14,7 +14,6 @@ do{                                                                             
 	fprintf(stderr,__VA_ARGS__);                                                                  \
 	for(_i=0;_i < _size;_i++) {                                                                   \
 		if ((_i % 16) == 0) {                                                                     \
-			fprintf(stderr,"\n");                                                                 \
 			if (_i > 0) {                                                                         \
 				fprintf(stderr,"    ");                                                           \
 				while(_lasti < _i) {                                                              \
@@ -26,6 +25,7 @@ do{                                                                             
 					_lasti ++;                                                                    \
 				}                                                                                 \
 			}                                                                                     \
+			fprintf(stderr,"\n");                                                                 \
 			fprintf(stderr,"0x%08x:",_i);                                                         \
 		}                                                                                         \
 		fprintf(stderr," 0x%02x",_ptr[_i]);                                                       \
@@ -47,3 +47,9 @@ do{                                                                             
 	}                                                                                             \
 	fprintf(stderr,"\n");	                                                                      \
 }while(0)
+
+#else
+#define BN_LOG(...) do{} while(0)
+#define BN_BUFFER_LOG(ptr,size,...)     do{}while(0)
+
+#endif

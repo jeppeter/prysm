@@ -877,7 +877,7 @@ struct Param {
 		}
 #endif
 		std::string nstr;
-		BN_LOG("");
+		BN_LOG(" ");
 		gmp::setStr(pb, z, cp.z);
 		nstr.resize(200);
 		mcl::gmp::getStr((char*)(nstr.data()),200,z,16);

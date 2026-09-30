@@ -553,7 +553,7 @@ MCL_DLL_API size_t div(Unit *q, size_t qn, Unit *x, size_t xn, const Unit *y, si
 
 MCL_DLL_API void mulNM(Unit *z, const Unit *x, size_t xn, const Unit *y, size_t yn)
 {
-	BN_LOG(" ");
+	BN_LOG("z %p x %p xn [%ld] y %p yn [%ld]",z,x,xn,y,yn);
 	if (xn == 0 || yn == 0) return;
 	if (yn > xn) {
 		BN_LOG(" ");
@@ -585,14 +585,22 @@ MCL_DLL_API void mulNM(Unit *z, const Unit *x, size_t xn, const Unit *y, size_t 
 		BN_LOG(" ");
 	}
 	BN_LOG(" ");
+#ifdef WINDOWS_DEFINE
 	z[xn] = mulUnitN(z, x, y[0], xn);
-	BN_LOG(" ");
+	BN_LOG("z[%d] 0x%llx x 0x%llx y[0] 0x%llx",(int)xn, z[xn],*x,y[0]);
+#else	
+	z[xn] = mulUnitN(z, x, y[0], xn);
+	BN_LOG("z[%d] 0x%lx x 0x%lx y[0] 0x%lx",(int)xn, z[xn],*x,y[0]);
+#endif
 	u_ppu mulUnitAdd = get_mulUnitAdd(xn);
-	BN_LOG(" ");
+	BN_LOG("[%d]mulUnitAdd %p",(int)xn,mulUnitAdd);
 	for (size_t i = 1; i < yn; i++) {
-		BN_LOG(" ");
 		z[xn + i] = mulUnitAdd(&z[i], x, y[i]);
-		BN_LOG(" ");
+#ifdef WINDOWS_DEFINE		
+		BN_LOG("z[%d + 1] 0x%llx z[%d] 0x%llx x 0x%llx y[%d] 0x%llx",(int)xn,z[xn+i], (int)i,z[i],*x,(int)i,y[i]);
+#else
+		BN_LOG("z[%d + 1] 0x%lx z[%d] 0x%lx x 0x%lx y[%d] 0x%lx",(int)xn,z[xn+i], (int)i,z[i],*x,(int)i,y[i]);
+#endif
 	}
 	BN_LOG(" ");
 }

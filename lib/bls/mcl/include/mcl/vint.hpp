@@ -645,7 +645,7 @@ public:
 		z.buf_.alloc(&b, zn);
 		BN_LOG(" ");
 		assert(b); (void)b;
-		BN_LOG(" ");
+		BN_LOG("&z.buf_[0] %p &x.buf_[0] %p xn [%ld] &y.buf_[0] %p yn [%ld]",&z.buf_[0], &x.buf_[0],xn,&y.buf_[0],yn);
 		bint::mulNM(&z.buf_[0], &x.buf_[0], xn, &y.buf_[0], yn);
 		BN_BUFFER_LOG(&z.buf_[0],sizeof(z.buf_[0]) * zn, "z buffer");
 		BN_BUFFER_LOG(&x.buf_[0],sizeof(x.buf_[0]) * xn, "x buffer");

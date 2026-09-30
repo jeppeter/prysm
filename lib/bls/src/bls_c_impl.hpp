@@ -87,14 +87,14 @@ int blsSetMapToMode(int mode)
 	return mclBn_setMapToMode(mode);
 }
 
-const char* st_write_error_msg = "compiledTimeVar error\n";
-const char* st_note_init_msg = "blsInit function\n";
-const char* st_succ_compare_msg = "succ compare var\n";
-
+#if 0
 #define INIT_LOG(...)  do{fprintf(stderr,"[%s:%d] ",__FILE__,__LINE__); fprintf(stderr,__VA_ARGS__);fprintf(stderr,"\n");fflush(stderr);} while(0)
-
+#else
+#define INIT_LOG(...)  do{} while(0)
+#endif
 int blsInit(int curve, int compiledTimeVar)
 {
+	INIT_LOG("compiledTimeVar %d MCLBN_COMPILED_TIME_VAR %d",compiledTimeVar,MCLBN_COMPILED_TIME_VAR);
 	if (compiledTimeVar != MCLBN_COMPILED_TIME_VAR) {
 		//fprintf(stderr,"compiledTimeVar %d MCLBN_COMPILED_TIME_VAR %d\n",compiledTimeVar,MCLBN_COMPILED_TIME_VAR);
 		INIT_LOG("compiledTimeVar %d MCLBN_COMPILED_TIME_VAR %d",compiledTimeVar,MCLBN_COMPILED_TIME_VAR);		
