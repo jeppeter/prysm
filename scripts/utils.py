@@ -59,16 +59,23 @@ def compile_bin(args,d):
     try:
         myenv= os.environ.copy()
         myenv['CGO_CFLAGS'] = '-O -D__BLST_PORTABLE__'
+        myenv['GOPROXY'] = args.goproxy
+        if args.goos is not None:
+            myenv['GOOS'] = args.goos
+        if args.goarch is not None:
+            myenv['GOARCH'] = args.goarch
         os.chdir(args.topdir)
         cmds = []
         cmds.append(get_go_cmd())
         cmds.append('build')
         cmds.append('-o')
         if is_windows():
-            cmds.append('.\\cmd\\%s\\%s.exe'%(d,d))
+            outf = '.\\cmd\\%s\\%s.exe'%(d,d)
+            cmds.append(outf)
             cmds.append('.\\cmd\\%s'%(d))
         else:
-            cmds.append('./cmd/%s/%s'%(d,d))
+            outf = './cmd/%s/%s'%(d,d)
+            cmds.append(outf)
             cmds.append('./cmd/%s'%(d))
         subprocess.check_call(cmds,env=myenv)
         retval = True
