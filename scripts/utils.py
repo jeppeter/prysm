@@ -128,6 +128,9 @@ def load_base_parser(parser):
         "reserved|R" : false,
         "networkid" : 2363,
         "topdir" : "%s",
+        "datadir" : "%s",
+        "gethdir" : "%s",
+        "gethdatadir" : "%s",
         "force|F" : false,
         "compile<%s.compile_handler>##bins ... to compile bins now support is %s ##" : {
             "$" : "+"
@@ -140,6 +143,15 @@ def load_base_parser(parser):
     }
     '''
     topdir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
+    if is_windows():
+        datadir = os.path.join(topdir,'datadir_windows')
+    else:
+        datadir = os.path.join(topdir,'datadir_linux')
+    gethdir = os.path.abspath(os.path.join(topdir,'..','go-ethereum'))
+    if is_windows():
+        gethdatadir = os.path.join(gethdir,'datastore_windows')
+    else:
+        gethdatadir = os.path.join(gethdir,'datastore_linux')
     support_binnames = get_support_bin(topdir)
     support_bin_dir = ''
     for d in support_binnames:
@@ -147,10 +159,16 @@ def load_base_parser(parser):
             support_bin_dir += ','
         support_bin_dir += '%s'%(d)
     repltopdir = topdir
+    replgethdir = gethdir
+    repldatadir = datadir
+    replgethdatadir = gethdatadir
     if is_windows():
         repltopdir = repltopdir.replace('\\','\\\\')
+        replgethdir = replgethdir.replace('\\','\\\\')
+        repldatadir = repldatadir.replace('\\','\\\\')
+        replgethdatadir = replgethdatadir.replace('\\','\\\\')
 
-    commandline = commandline_fmt%(repltopdir,__name__,support_bin_dir,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,__name__,support_bin_dir,__name__)
     parser.load_command_line_string(commandline)
     return parser
 
