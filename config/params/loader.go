@@ -66,6 +66,7 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 	// SECONDS_PER_SLOT and SLOT_DURATION_MS express the same value. Track which ones the file
 	// sets so the one left at its preset default can be derived from the other.
 	hasSecondsPerSlot, hasSlotDurationMs := false, false
+	log.Errorf("yamlFile\n%s", string(yamlFile))
 	// Convert 0x hex inputs to fixed bytes arrays
 	lines := strings.Split(string(yamlFile), "\n")
 	if conf == nil {
@@ -96,6 +97,7 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 		}
 	}
 	yamlFile = []byte(strings.Join(lines, "\n"))
+	log.Errorf("yamlFile reformed\n%s", string(yamlFile))
 	if err := yaml.UnmarshalStrict(yamlFile, conf); err != nil {
 		var typeError *yaml.TypeError
 		if !errors.As(err, &typeError) {
@@ -114,7 +116,8 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 	conf.SqrRootSlotsPerEpoch = primitives.Slot(math.IntegerSquareRoot(uint64(conf.SlotsPerEpoch)))
 	// Recompute the fork schedule
 	conf.InitializeForkSchedule()
-	log.Debugf("Config file values: %+v", conf)
+	//log.Debugf("Config file values: %+v", conf)
+	log.Errorf("Config file values: %+v", conf)
 	return conf, nil
 }
 
@@ -123,6 +126,7 @@ func UnmarshalConfigFile(path string, conf *BeaconChainConfig) (*BeaconChainConf
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to read chain config file.")
 	}
+	log.Errorf("read %s yamlFile\n%s", path, string(yamlFile))
 	return UnmarshalConfig(yamlFile, conf)
 }
 

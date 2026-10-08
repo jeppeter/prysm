@@ -30,6 +30,8 @@ class ArgsForge(object):
         self.datadir = None
         self.gethdir = None
         self.gethdatadir = None
+        self.goos = None
+        self.goarch = None
         self.force = False
         if not (content is  None):
             rdict = json.loads(content)
@@ -44,6 +46,10 @@ class ArgsForge(object):
                     self.gethdatadir = v
                 elif k == 'force':
                     self.force = v
+                elif k == 'goos':
+                    self.goos = v
+                elif k == 'goarch':
+                    self.goarch = v
         if self.topdir is None:
             self.topdir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
         if self.datadir is None:
@@ -153,8 +159,9 @@ def checkenv_handler(args,parser):
     return
 
 
-def get_forkname(topdir):
-    args = ArgsForge()
+def get_forkname(args=None):
+    if args is None:
+        args = ArgsForge()
     # now first to compile the 
     retval = compile_bin(args,'prysmext')
     if not retval:
@@ -192,7 +199,7 @@ def load_base_parser(parser):
         "gethdir" : "%s",
         "gethdatadir" : "%s",
         "force|F" : false,
-        "forkname##forkname for pos specified support is %s##" : null,
+        "forkname##forkname for pos specified support is %s##" : "%s",
         "compile<%s.compile_handler>##bins ... to compile bins now support is %s ##" : {
             "$" : "+"
         },
@@ -217,14 +224,17 @@ def load_base_parser(parser):
         replgethdir = replgethdir.replace('\\','\\\\')
         repldatadir = repldatadir.replace('\\','\\\\')
         replgethdatadir = replgethdatadir.replace('\\','\\\\')
-    forknames = get_forkname(args.topdir)
+    forknames = get_forkname(args)
     forks = ''
+    deffork = ''
+    if len(forknames) > 0:
+        deffork = forknames[0]
     for v in forknames:
         if len(forks) > 0:
             forks += ','
         forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,forks,__name__,support_bin_dir,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,forks,deffork,__name__,support_bin_dir,__name__)
     parser.load_command_line_string(commandline)
     return parser
 
