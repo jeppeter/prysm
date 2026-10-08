@@ -24,6 +24,43 @@ from strop import rand_buffer
 from procop import ProcExpolore
 
 
+class ArgsForge(object):
+    def __init__(self,content=None):
+        self.topdir = None
+        self.datadir = None
+        self.gethdir = None
+        self.gethdatadir = None
+        self.force = False
+        if not (content is  None):
+            rdict = json.loads(content)
+            for (k,v) in rdict:
+                if k == 'topdir':
+                    self.topdir = v
+                elif k == 'datadir':
+                    self.datadir = v
+                elif k == 'gethdir':
+                    self.gethdir = v
+                elif k == 'gethdatadir':
+                    self.gethdatadir = v
+                elif k == 'force':
+                    self.force = v
+        if self.topdir is None:
+            self.topdir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
+        if self.datadir is None:
+            if is_windows():
+                self.datadir = os.path.join(self.topdir,'datadir_windows')
+            else:
+                self.datadir = os.path.join(self.topdir,'datadir_linux')
+        if self.gethdir is None:
+            self.gethdir = os.path.abspath(os.path.join(self.topdir,'..','go-ethereum'))
+        if self.gethdatadir is None:
+            if is_windows():
+                self.gethdatadir = os.path.join(self.gethdir,'datastore_windows')
+            else:
+                self.gethdatadir = os.path.join(self.gethdir,'datastore_linux')
+        return
+            
+
 def get_support_bin(topdir):
     cmddir = os.path.join(topdir,'cmd')
     dirs = os.listdir(cmddir)
@@ -115,6 +152,29 @@ def checkenv_handler(args,parser):
     sys.exit(0)
     return
 
+
+def get_forkname(topdir):
+    args = ArgsForge()
+    # now first to compile the 
+    retval = compile_bin(args,'prysmext')
+    if not retval:
+        raise Exception('can not run compile prysmext')
+    cmds = [get_extbin(args)]
+    cmds.append('expforkname')
+    po = subprocess.run(cmds,capture_output=True)
+    try:
+        po.check_returncode()
+    except:
+        sys.stderr.write('run %s error\n%s'%(cmds,traceback.format_exc()))
+        raise Exception('%s erorr'%(cmds))
+    outb = po.stdout    
+    try:
+        outs = outb.decode('utf-8')
+        rarr = json.loads(outs)
+    except:
+        raise Exception('output %s error\n%s'%(outb,traceback.format_exc()))
+    return rarr
+
 def load_base_parser(parser):
     commandline_fmt='''
     {
@@ -132,43 +192,39 @@ def load_base_parser(parser):
         "gethdir" : "%s",
         "gethdatadir" : "%s",
         "force|F" : false,
+        "forkname##forkname for pos specified support is %s##" : null,
         "compile<%s.compile_handler>##bins ... to compile bins now support is %s ##" : {
             "$" : "+"
         },
         "checkenv<%s.checkenv_handler>##to check environment to compile##" : {
             "$" : 0
         }
-
-
     }
     '''
-    topdir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
-    if is_windows():
-        datadir = os.path.join(topdir,'datadir_windows')
-    else:
-        datadir = os.path.join(topdir,'datadir_linux')
-    gethdir = os.path.abspath(os.path.join(topdir,'..','go-ethereum'))
-    if is_windows():
-        gethdatadir = os.path.join(gethdir,'datastore_windows')
-    else:
-        gethdatadir = os.path.join(gethdir,'datastore_linux')
-    support_binnames = get_support_bin(topdir)
+    args = ArgsForge()
+    support_binnames = get_support_bin(args.topdir)
     support_bin_dir = ''
     for d in support_binnames:
         if len(support_bin_dir) > 0:
             support_bin_dir += ','
         support_bin_dir += '%s'%(d)
-    repltopdir = topdir
-    replgethdir = gethdir
-    repldatadir = datadir
-    replgethdatadir = gethdatadir
+    repltopdir = args.topdir
+    replgethdir = args.gethdir
+    repldatadir = args.datadir
+    replgethdatadir = args.gethdatadir
     if is_windows():
         repltopdir = repltopdir.replace('\\','\\\\')
         replgethdir = replgethdir.replace('\\','\\\\')
         repldatadir = repldatadir.replace('\\','\\\\')
         replgethdatadir = replgethdatadir.replace('\\','\\\\')
+    forknames = get_forkname(args.topdir)
+    forks = ''
+    for v in forknames:
+        if len(forks) > 0:
+            forks += ','
+        forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,__name__,support_bin_dir,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,forks,__name__,support_bin_dir,__name__)
     parser.load_command_line_string(commandline)
     return parser
 

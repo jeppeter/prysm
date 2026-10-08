@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/checkenv"
+	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/expforkname"
 	"github.com/urfave/cli/v2"
 )
 
@@ -21,4 +22,5 @@ func main() {
 
 func init() {
 	prysmextCommands = append(prysmextCommands, checkenv.Commands...)
+	prysmextCommands = append(prysmextCommands, expforkname.Commands...)
 }
