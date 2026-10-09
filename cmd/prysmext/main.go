@@ -17,10 +17,15 @@ var logfilesFlag = &cli.StringSliceFlag{
 	Name:  "log.files",
 	Usage: "for log files by comma seperate",
 }
+var logappendFlag = &cli.StringSliceFlag{
+	Name:  "log.appends",
+	Usage: "for log append files by comma seperate",
+}
 
 var appFlags = []cli.Flag{
 	cmd.VerbosityFlag,
 	logfilesFlag,
+	logappendFlag,
 }
 
 var Commands = []*cli.Command{
@@ -46,9 +51,8 @@ func main() {
 			}
 			logrus.SetLevel(verboselevel)
 			logfs := ctx.StringSlice(logfilesFlag.Name)
+			var outf []io.Writer = []io.Writer{os.Stderr}
 			if len(logfs) > 0 {
-				var outf []io.Writer = []io.Writer{}
-
 				for _, n := range logfs {
 					var curf *os.File
 					curf, err = os.OpenFile(n, os.O_CREATE|os.O_WRONLY, 0644)
@@ -57,11 +61,21 @@ func main() {
 					}
 					outf = append(outf, curf)
 				}
-				outf = append(outf, os.Stderr)
-				logrus.SetOutput(io.MultiWriter(outf...))
-			} else {
-				logrus.SetOutput(os.Stderr)
 			}
+
+			logapps := ctx.StringSlice(logappendFlag.Name)
+			if len(logapps) > 0 {
+				for _, n := range logfs {
+					var curf *os.File
+					curf, err = os.OpenFile(n, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+					if err != nil {
+						return
+					}
+					outf = append(outf, curf)
+				}
+			}
+
+			logrus.SetOutput(io.MultiWriter(outf...))
 
 			err = nil
 			return
