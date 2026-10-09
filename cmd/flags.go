@@ -41,6 +41,17 @@ var (
 		Name:  "log.vmodule",
 		Usage: "Per-package log verbosity. packagePath=level entries separated by commas.",
 	}
+	// LogfilesFlag defines to write for log files
+	LogfilesFlag = &cli.StringSliceFlag{
+		Name:  "log.files",
+		Usage: "for log files by comma seperate",
+	}
+	// LogappendFlag defines to append for log files
+	LogappendFlag = &cli.StringSliceFlag{
+		Name:  "log.appends",
+		Usage: "for log append files by comma seperate",
+	}
+
 	// DataDirFlag defines a path on disk where Prysm databases are stored.
 	DataDirFlag = &cli.StringFlag{
 		Name:  "datadir",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/OffchainLabs/prysm/v7/cmd"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/checkenv"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/expforkname"
@@ -13,19 +14,10 @@ import (
 
 var prysmextCommands []*cli.Command
 
-var logfilesFlag = &cli.StringSliceFlag{
-	Name:  "log.files",
-	Usage: "for log files by comma seperate",
-}
-var logappendFlag = &cli.StringSliceFlag{
-	Name:  "log.appends",
-	Usage: "for log append files by comma seperate",
-}
-
 var appFlags = []cli.Flag{
 	cmd.VerbosityFlag,
-	logfilesFlag,
-	logappendFlag,
+	cmd.LogfilesFlag,
+	cmd.LogappendFlag,
 }
 
 var Commands = []*cli.Command{
@@ -50,7 +42,7 @@ func main() {
 				return
 			}
 			logrus.SetLevel(verboselevel)
-			logfs := ctx.StringSlice(logfilesFlag.Name)
+			logfs := ctx.StringSlice(cmd.LogfilesFlag.Name)
 			var outf []io.Writer = []io.Writer{os.Stderr}
 			if len(logfs) > 0 {
 				for _, n := range logfs {
@@ -63,11 +55,12 @@ func main() {
 				}
 			}
 
-			logapps := ctx.StringSlice(logappendFlag.Name)
+			logapps := ctx.StringSlice(cmd.LogappendFlag.Name)
+			fmt.Fprintf(os.Stderr, "LogappendFlag %v\n", logapps)
 			if len(logapps) > 0 {
-				for _, n := range logfs {
+				for _, n := range logapps {
 					var curf *os.File
-					curf, err = os.OpenFile(n, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+					curf, err = os.OpenFile(n, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 					if err != nil {
 						return
 					}
