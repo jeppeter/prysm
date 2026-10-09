@@ -337,3 +337,23 @@ func startPProf(address string) {
 		}
 	}()
 }
+
+func GetCallerString(skip int) (outs string) {
+	var f string
+	var lineno int
+	var ok bool
+	var sidx int = skip
+	outs = ""
+	for {
+		_, f, lineno, ok = runtime.Caller(sidx)
+		if !ok {
+			break
+		}
+		if len(outs) > 0 {
+			outs += ";"
+		}
+		outs += fmt.Sprintf("[%d][%s:%d]", sidx, f, lineno)
+		sidx += 1
+	}
+	return
+}

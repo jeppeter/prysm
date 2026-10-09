@@ -94,11 +94,11 @@ func logtst_Handler(ctx *cli.Context) (err error) {
 	}
 
 	for i = 0; i < cnt; i += 1 {
-		logrus.Errorf("cnt %d", i)
-		logrus.Debugf("cnt %d", i)
-		logrus.Infof("cnt %d", i)
-		logrus.Tracef("cnt %d", i)
-		logrus.Warnf("cnt %d", i)
+		logrus.Errorf("cnt\n%d", i)
+		logrus.Debugf("cnt\n%d", i)
+		logrus.Infof("cnt\n%d", i)
+		logrus.Tracef("cnt\n%d", i)
+		logrus.Warnf("cnt\n%d", i)
 	}
 	err = nil
 	return

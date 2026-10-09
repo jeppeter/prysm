@@ -187,6 +187,13 @@ def get_forkname(args=None):
         raise Exception('output %s error\n%s'%(outb,traceback.format_exc()))
     return rarr
 
+def unescape_handler(args,parser):
+    set_logging(args)
+    ins = read_file(args.input)
+    outs = ins.replace('\\n','\n')
+    write_file(outs,args.output)
+    sys.exit(0)
+
 def load_base_parser(parser):
     commandline_fmt='''
     {
@@ -209,6 +216,9 @@ def load_base_parser(parser):
             "$" : "+"
         },
         "checkenv<%s.checkenv_handler>##to check environment to compile##" : {
+            "$" : 0
+        },
+        "unescape<%s.unescape_handler>##to unescape for file##" : {
             "$" : 0
         }
     }
@@ -239,7 +249,7 @@ def load_base_parser(parser):
             forks += ','
         forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,forks,deffork,__name__,support_bin_dir,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,forks,deffork,__name__,support_bin_dir,__name__,__name__)
     parser.load_command_line_string(commandline)
     return parser
 

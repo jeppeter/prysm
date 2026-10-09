@@ -9,6 +9,7 @@ import (
 
 	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
 	"github.com/OffchainLabs/prysm/v7/math"
+	"github.com/OffchainLabs/prysm/v7/runtime/debug"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 )
@@ -66,7 +67,8 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 	// SECONDS_PER_SLOT and SLOT_DURATION_MS express the same value. Track which ones the file
 	// sets so the one left at its preset default can be derived from the other.
 	hasSecondsPerSlot, hasSlotDurationMs := false, false
-	log.Errorf("yamlFile\n%s", string(yamlFile))
+	log.Infof(fmt.Sprintf("%s loader yamlFile\n%s", debug.GetCallerString(1), string(yamlFile)))
+
 	// Convert 0x hex inputs to fixed bytes arrays
 	lines := strings.Split(string(yamlFile), "\n")
 	if conf == nil {
@@ -97,7 +99,7 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 		}
 	}
 	yamlFile = []byte(strings.Join(lines, "\n"))
-	log.Errorf("yamlFile reformed\n%s", string(yamlFile))
+	log.Infof(fmt.Sprintf("%s yamlFile reformed\n%s", debug.GetCallerString(1), string(yamlFile)))
 	if err := yaml.UnmarshalStrict(yamlFile, conf); err != nil {
 		var typeError *yaml.TypeError
 		if !errors.As(err, &typeError) {
@@ -117,7 +119,7 @@ func UnmarshalConfig(yamlFile []byte, conf *BeaconChainConfig) (*BeaconChainConf
 	// Recompute the fork schedule
 	conf.InitializeForkSchedule()
 	//log.Debugf("Config file values: %+v", conf)
-	log.Errorf("Config file values: %+v", conf)
+	log.Infof("Config file values: %+v", conf)
 	return conf, nil
 }
 
@@ -126,7 +128,7 @@ func UnmarshalConfigFile(path string, conf *BeaconChainConfig) (*BeaconChainConf
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to read chain config file.")
 	}
-	log.Errorf("read %s yamlFile\n%s", path, string(yamlFile))
+	log.Infof("read %s yamlFile\n%s", path, string(yamlFile))
 	return UnmarshalConfig(yamlFile, conf)
 }
 
