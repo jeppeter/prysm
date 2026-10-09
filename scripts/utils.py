@@ -32,6 +32,7 @@ class ArgsForge(object):
         self.gethdatadir = None
         self.goos = None
         self.goarch = None
+        self.goproxy = None
         self.force = False
         if not (content is  None):
             rdict = json.loads(content)
@@ -50,6 +51,8 @@ class ArgsForge(object):
                     self.goos = v
                 elif k == 'goarch':
                     self.goarch = v
+                elif k == 'goproxy':
+                    self.goproxy = v
         if self.topdir is None:
             self.topdir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
         if self.datadir is None:
@@ -64,6 +67,8 @@ class ArgsForge(object):
                 self.gethdatadir = os.path.join(self.gethdir,'datastore_windows')
             else:
                 self.gethdatadir = os.path.join(self.gethdir,'datastore_linux')
+        if self.goproxy is None:
+            self.goproxy = 'https://goproxy.cn'
         return
             
 
