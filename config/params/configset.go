@@ -71,7 +71,9 @@ func (r *configset) add(c *BeaconChainConfig) error {
 	}
 	c.InitializeForkSchedule()
 	for v := range c.ForkVersionSchedule {
+		log.Tracef("v %v", v)
 		if n, exists := r.versionToName[v]; exists {
+			log.Tracef("n %v", n)
 			// determine the fork name for the colliding version
 			cfv := ConfigForkVersions(c)
 			versionId := cfv[v]

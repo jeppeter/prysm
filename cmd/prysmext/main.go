@@ -5,6 +5,7 @@ import (
 	"github.com/OffchainLabs/prysm/v7/cmd"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/checkenv"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/expforkname"
+	"github.com/OffchainLabs/prysm/v7/runtime/simpleformatter"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"io"
@@ -34,7 +35,15 @@ func main() {
 		Commands: prysmextCommands,
 		Before: func(ctx *cli.Context) (err error) {
 			verbose := ctx.String(cmd.VerbosityFlag.Name)
+			var formatter *simpleformatter.SimpleFormatter = &simpleformatter.SimpleFormatter{}
+			formatter.DebugFileLine = false
+			formatter.TimeFormat = false
+			formatter.LevelFormat = true
+			formatter.PackageFormat = false
 			if verbose == "trace" || verbose == "info" || verbose == "warn" {
+				formatter.DebugFileLine = true
+				formatter.PackageFormat = true
+				formatter.TimeFormat = true
 				logrus.SetReportCaller(true)
 			}
 			verboselevel, err := logrus.ParseLevel(verbose)
@@ -69,6 +78,7 @@ func main() {
 			}
 
 			logrus.SetOutput(io.MultiWriter(outf...))
+			logrus.SetFormatter(formatter)
 
 			err = nil
 			return
