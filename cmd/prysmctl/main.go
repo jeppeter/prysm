@@ -21,6 +21,7 @@ var prysmctlFlags = []cli.Flag{
 	cmd.VerbosityFlag,
 	cmd.LogfilesFlag,
 	cmd.LogappendFlag,
+	cmd.LogFormat,
 }
 
 func main() {
@@ -30,6 +31,7 @@ func main() {
 		Before: func(ctx *cli.Context) (err error) {
 			verbose := ctx.String(cmd.VerbosityFlag.Name)
 			var formatter *simpleformatter.SimpleFormatter = &simpleformatter.SimpleFormatter{}
+			var logformat string
 			formatter.DebugFileLine = false
 			formatter.TimeFormat = false
 			formatter.LevelFormat = true
@@ -72,7 +74,10 @@ func main() {
 			}
 
 			logrus.SetOutput(io.MultiWriter(outf...))
-			logrus.SetFormatter(formatter)
+			logformat = ctx.String(cmd.LogFormat.Name)
+			if logformat == "simple" {
+				logrus.SetFormatter(formatter)
+			}
 
 			err = nil
 			return

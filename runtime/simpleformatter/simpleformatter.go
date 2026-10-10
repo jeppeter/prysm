@@ -19,7 +19,6 @@ func NewSimpleFormatter() (retp *SimpleFormatter, err error) {
 		DebugFileLine: false,
 		TimeFormat:    false,
 		LevelFormat:   true,
-		PackageFormat: true,
 	}
 	return
 }
@@ -49,15 +48,6 @@ func (f *SimpleFormatter) Format(entry *logrus.Entry) (outb []byte, err error) {
 		outs += " "
 	}
 
-	if f.PackageFormat {
-		var s string
-		var ok bool
-		s, ok = entry.Data["package"].(string)
-		if ok {
-			outs += fmt.Sprintf("package[%s] ", s)
-		}
-	}
-
 	if f.DebugFileLine {
 		if entry.HasCaller() {
 			outs += fmt.Sprintf("[%s:%d] ", entry.Caller.File, entry.Caller.Line)
@@ -65,6 +55,31 @@ func (f *SimpleFormatter) Format(entry *logrus.Entry) (outb []byte, err error) {
 	}
 	if f.TimeFormat {
 		outs += fmt.Sprintf("[%s] ", entry.Time.Format(time.RFC3339))
+	}
+
+	for k, v := range entry.Data {
+		if k == logrus.FieldKeyMsg {
+			continue
+		}
+		if k == logrus.FieldKeyTime {
+			continue
+		}
+		if k == logrus.FieldKeyLevel {
+			continue
+		}
+
+		if k == logrus.FieldKeyLogrusError {
+			continue
+		}
+
+		if k == logrus.FieldKeyFunc {
+			continue
+		}
+
+		if k == logrus.FieldKeyFile {
+			continue
+		}
+		outs += fmt.Sprintf("%s[%v] ", k, v)
 	}
 
 	outs += fmt.Sprintf("%s\n", entry.Message)

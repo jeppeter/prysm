@@ -34,6 +34,7 @@ class ArgsForge(object):
         self.goarch = None
         self.goproxy = None
         self.force = False
+        self.chainconfigfile = None
         if not (content is  None):
             rdict = json.loads(content)
             for (k,v) in rdict:
@@ -53,6 +54,8 @@ class ArgsForge(object):
                     self.goarch = v
                 elif k == 'goproxy':
                     self.goproxy = v
+                elif k == 'chainconfigfile':
+                    self.chainconfigfile = v
         if self.topdir is None:
             self.topdir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
         if self.datadir is None:
@@ -67,6 +70,8 @@ class ArgsForge(object):
                 self.gethdatadir = os.path.join(self.gethdir,'datastore_windows')
             else:
                 self.gethdatadir = os.path.join(self.gethdir,'datastore_linux')
+        if self.chainconfigfile is None:
+            self.chainconfigfile = os.path.join(self.topdir,'scripts','config.yml')
         if self.goproxy is None:
             self.goproxy = 'https://goproxy.cn'
         return
@@ -92,6 +97,12 @@ def get_go_cmd():
 
 def get_extbin(args):
     retval = os.path.join(args.topdir,'cmd','prysmext','prysmext')
+    if is_windows():
+        retval += '.exe'
+    return retval
+
+def get_prysm_bin(args,n):
+    retval = os.path.join(args.topdir,'cmd',n,n)
     if is_windows():
         retval += '.exe'
     return retval
@@ -194,6 +205,78 @@ def unescape_handler(args,parser):
     write_file(outs,args.output)
     sys.exit(0)
 
+def find_geth_genesis(args):
+    allfiles = os.listdir(args.gethdatadir)
+    genexpr = re.compile('genesis\\.([^\\.]+)\\.json')
+    retfile = None
+    for f in allfiles:
+        if genexpr.match(f):
+            curf = os.path.join(args.gethdatadir,f)
+            if os.path.isfile(curf):
+                retfile = curf
+                break
+    return retfile
+
+KEYWORD_ALLOC = 'alloc'
+
+def generate_genesis(args,prysmctl,genin):
+    ins = read_file(genin)
+    retval = False
+    make_directory_safe(args.datadir)
+    logfile = os.path.join(args.datadir,'ssz.log')
+    rdict =json.loads(ins)
+    validators = 0
+    if KEYWORD_ALLOC in rdict.keys():
+        cdict = rdict[KEYWORD_ALLOC]
+        validators = len(cdict.keys())
+    if validators < 2:
+        raise Exception('validators %d < 2'%(validators))
+    genout = os.path.join(args.datadir,'genesis.out.json')
+    genssz = os.path.join(args.datadir,'genesis.ssz')
+    cmds = [prysmctl]
+    cmds.append('--verbosity')
+    cmds.append('trace')
+    cmds.append('--log-format')
+    cmds.append('simple')
+    cmds.append('--log.files=%s'%(logfile))
+    cmds.append('testnet')
+    cmds.append('generate-genesis')
+    cmds.append('--fork=%s'%(args.forkname))
+    cmds.append('--num-validators=%d'%(validators))
+    cmds.append('--chain-config-file=%s'%(args.chainconfigfile))
+    cmds.append('--geth-genesis-json-in=%s'%(genin))
+    cmds.append('--output-ssz=%s'%(genssz))
+    cmds.append('--geth-genesis-json-out=%s'%(genout))
+    try:
+        logging.info('cmds %s'%(cmds))
+        ndevnull = open(os.devnull,'w+')
+        subprocess.check_call(cmds,stdout=ndevnull,stderr=ndevnull)
+        retval = True
+    except:
+        retval = False
+        logging.error('%s'%(traceback.format_exc()))
+
+    return retval
+
+def genssz_handler(args,parser):
+    set_logging(args)
+    # now first to find the genesis in
+    genin = find_geth_genesis(args)
+    if genin is None:
+        raise Exception('can not find genesis.json in %s'%(args.gethdatadir))
+    prysmctl = get_prysm_bin(args,'prysmctl')
+    if not os.path.isfile(prysmctl):
+        raise Exception('no %s compiled'%(prysmctl))
+    # now we should give the genesis
+    forknames = get_forkname(args)
+    if args.forkname not in forknames:
+        raise Exception('%s fork not support'%(args.forkname))
+
+    retval = generate_genesis(args,prysmctl,genin)
+    if not retval:
+        sys.exit(3)
+    sys.exit(0)
+
 def load_base_parser(parser):
     commandline_fmt='''
     {
@@ -210,6 +293,7 @@ def load_base_parser(parser):
         "datadir" : "%s",
         "gethdir" : "%s",
         "gethdatadir" : "%s",
+        "chainconfigfile" : "%s",
         "force|F" : false,
         "forkname##forkname for pos specified support is %s##" : "%s",
         "compile<%s.compile_handler>##bins ... to compile bins now support is %s ##" : {
@@ -219,6 +303,9 @@ def load_base_parser(parser):
             "$" : 0
         },
         "unescape<%s.unescape_handler>##to unescape for file##" : {
+            "$" : 0
+        },
+        "genssz<%s.genssz_handler>##to make genesis ssz##" : {
             "$" : 0
         }
     }
@@ -234,11 +321,14 @@ def load_base_parser(parser):
     replgethdir = args.gethdir
     repldatadir = args.datadir
     replgethdatadir = args.gethdatadir
+    replchainconfigfile = args.chainconfigfile
+
     if is_windows():
         repltopdir = repltopdir.replace('\\','\\\\')
         replgethdir = replgethdir.replace('\\','\\\\')
         repldatadir = repldatadir.replace('\\','\\\\')
         replgethdatadir = replgethdatadir.replace('\\','\\\\')
+        replchainconfigfile = replchainconfigfile.replace('\\','\\\\')
     forknames = get_forkname(args)
     forks = ''
     deffork = ''
@@ -249,7 +339,7 @@ def load_base_parser(parser):
             forks += ','
         forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,forks,deffork,__name__,support_bin_dir,__name__,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__)
     parser.load_command_line_string(commandline)
     return parser
 
