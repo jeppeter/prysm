@@ -128,6 +128,7 @@ func logtst_Handler(ctx *cli.Context) (err error) {
 }
 
 func init() {
+	appFlags = cmd.WrapFlags(appFlags)
 	prysmextCommands = append(prysmextCommands, checkenv.Commands...)
 	prysmextCommands = append(prysmextCommands, expforkname.Commands...)
 	prysmextCommands = append(prysmextCommands, Commands...)
