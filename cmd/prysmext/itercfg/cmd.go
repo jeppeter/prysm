@@ -65,6 +65,7 @@ func iter_flags(writer io.Writer, ctx *cli.Context, flags cli.Flag, tab int) {
 func itercfg_Handler(ctx *cli.Context) (err error) {
 	/*now first to get the command*/
 	var outs string
+	log.Debugf("format ctx.Command")
 	iter_command(os.Stdout, ctx, ctx.Command, 0)
 
 	//log.Infof("len Commands [%d]", len(ctx.App.Commands))
