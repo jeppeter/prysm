@@ -5,6 +5,7 @@ import (
 	"github.com/OffchainLabs/prysm/v7/cmd"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/checkenv"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/expforkname"
+	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/itercfg"
 	"github.com/OffchainLabs/prysm/v7/runtime/simpleformatter"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -20,6 +21,8 @@ var appFlags = []cli.Flag{
 	cmd.LogfilesFlag,
 	cmd.LogappendFlag,
 	cmd.LogFormat,
+	cmd.ConfigFileFlag,
+	// cmd.LoadFlagsFromConfig,
 }
 
 var Commands = []*cli.Command{
@@ -35,6 +38,11 @@ func main() {
 		Flags:    appFlags,
 		Commands: prysmextCommands,
 		Before: func(ctx *cli.Context) (err error) {
+			err = cmd.LoadFlagsFromConfig(ctx, appFlags)
+			if err != nil {
+				return
+			}
+
 			verbose := ctx.String(cmd.VerbosityFlag.Name)
 			var formatter *simpleformatter.SimpleFormatter = &simpleformatter.SimpleFormatter{}
 			var logformat string
@@ -123,4 +131,5 @@ func init() {
 	prysmextCommands = append(prysmextCommands, checkenv.Commands...)
 	prysmextCommands = append(prysmextCommands, expforkname.Commands...)
 	prysmextCommands = append(prysmextCommands, Commands...)
+	prysmextCommands = append(prysmextCommands, itercfg.Commands...)
 }
