@@ -22,6 +22,7 @@ from envop import is_windows,is_linux
 from tomlex import TomlEx
 from strop import rand_buffer
 from procop import ProcExpolore
+from key_word import *
 
 
 class ArgsForge(object):
@@ -217,7 +218,6 @@ def find_geth_genesis(args):
                 break
     return retfile
 
-KEYWORD_ALLOC = 'alloc'
 
 def generate_genesis(args,prysmctl,genin):
     ins = read_file(genin)
