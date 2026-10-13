@@ -293,7 +293,7 @@ def make_beacon_config_file(args,username,rdict,startport):
     yamlfile = datadir_file(args,username,'beacon_config.yaml')
     chaincfgfile = datadir_file(args,username,'genesis_config.yaml')
     ydatadir = os.path.dirname(datadir_file(args,username,'empty'))
-    logfile = datadir_file(args,username,'%s.log'%(username))
+    logfile = datadir_file(args,username,'beacon_%s.log'%(username))
     make_directory_safe(ydatadir)
     ins = read_file(tomlfile)
     tex = TomlEx()
@@ -341,11 +341,34 @@ def make_beacon_config_file(args,username,rdict,startport):
     yex.set_value(YAML_VERBOSITY_KEYWORD,'trace')
     yex.set_value(YAML_LOG_FORMAT_KEYWORD,'simple')
     yex.set_value(YAML_LOG_FILES_KEYWORD,[logfile])
-    yex.set_value(YAML_SLASHER_KEYWORD,True)
+    yex.set_value(YAML_SLASHER_KEYWORD,False)
     outs = yex.dumps()
     write_file(outs,yamlfile)
     return curport
 
+
+def start_beacon(args,username):
+    beaconcfg = datadir_file(args,username,'beacon_config.yaml')
+    cmds = []
+    cmds.append(get_prysm_bin(args,'beacon-chain'))
+    cmds.append('--config-file')
+    cmds.append(beaconcfg)
+    devnullfile = open(os.devnull,'wb')
+    if is_windows():
+        flags = 0
+        flags |= 0x00000008  # DETACHED_PROCESS
+        flags |= 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        flags |= 0x08000000  # CREATE_NO_WINDOW
+
+        pkwargs = {
+            'close_fds': True,  # close stdin/stdout/stderr on child
+            'creationflags': flags,
+        }
+        p = subprocess.Popen(cmds,stdout=devnullfile,stderr=devnullfile)
+    else:
+        logging.info('cmds %s'%(cmds))
+        p = subprocess.Popen(cmds,stdout=devnullfile,stderr=devnullfile)
+    return p
 
 def startbeacon_handler(args,parser):
     set_logging(args)
@@ -359,6 +382,46 @@ def startbeacon_handler(args,parser):
     for k in keys:
         make_beacon_config_file(args,k,rdict,startport)
         startport += 20
+    for k in keys:
+        p = start_beacon(args,k)
+        if args.verbose == 0:
+            sys.stdout.write('beacon-chain [%d]\n'%(p.pid))
+    sys.exit(0)
+
+def stopbeacon_handler(args,parser):
+    set_logging(args)
+    verbose_zero = False
+    if args.verbose == 0:
+        verbose_zero = True
+    ps = ProcExpolore()
+    errcnt = 0
+    while True:
+        pids = []
+        errcnt += 1
+        retval = ps.snapshot()
+        if not retval:
+            continue
+        res = ps.get_result()
+        for k,v in res.items():
+            if is_windows():
+                if v.firstarg == 'beacon-chain.exe' or v.firstarg.endswith('\\beacon-chain.exe'):
+                    pids.append(k)
+            else:
+                if v.firstarg == 'beacon-chain' or v.firstarg.endswith('/beacon-chain'):
+                    pids.append(k)
+        if len(pids) == 0:
+            break
+        for p in pids:
+            if verbose_zero:
+                sys.stdout.write('[%s]\n'%(p))
+            try:
+                if is_windows():
+                    os.kill(p,signal.CTRL_C_EVENT)
+                else:
+                    os.kill(p,signal.SIGINT)
+            except:
+                if errcnt > 3:
+                    logging.error('%s'%(traceback.format_exc()))
     sys.exit(0)
 
 def load_base_parser(parser):
@@ -394,6 +457,9 @@ def load_base_parser(parser):
         },
         "startbeacon<%s.startbeacon_handler>##listjson to start beacon for list##" : {
             "$" : 1
+        },
+        "stopbeacon<%s.stopbeacon_handler>##to stop beacon running##" : {
+            "$" : 0
         }
     }
     '''
@@ -426,7 +492,7 @@ def load_base_parser(parser):
             forks += ','
         forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__,__name__,__name__)
     parser.load_command_line_string(commandline)
     return parser
 
