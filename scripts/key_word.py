@@ -1,3 +1,50 @@
 
 
 KEYWORD_ALLOC = 'alloc'
+
+
+PASSWORD_KEYWORD = 'PASSWORD.KEY'
+ADDRESS_KEYWORD = 'address'
+GENESIS_CONFIG = 'config'
+GENESIS_CHAINID = 'chainId'
+GENESIS_ALLOC = 'alloc'
+GENESIS_BLANCE = 'balance'
+
+NODE_DATADIR_KEYWORD = 'Node.DataDir'
+NODE_IPCPATH_KEYWORD = 'Node.IPCPath'
+NODE_JWTSECRET_KEYWORD = 'Node.JWTSecret'
+NODE_AUTHADDR_KEYWORD = 'Node.AuthAddr'
+NODE_AUTHPORT_KEYWORD = 'Node.AuthPort'
+NODE_USERIDENT_KEYWORD = 'Node.UserIdent'
+
+P2P_MAXPENDINGPEERS_KEYWORD = 'Node.P2P.MaxPendingPeers'
+P2P_MAXPEERS_KEYWORD = 'Node.P2P.MaxPeers'
+ETH_WEI = 0xde0b6b3a7640000
+CFG_PORT_VALUES = ['Node.HTTPPort','Node.AuthPort','Node.WSPort','Metrics.Port']
+CFG_LISTEN_PORT = 'Node.P2P.ListenAddr'
+CFG_NETWORKID = 'Eth.NetworkId'
+CFG_INFLUX_DB_PORT = 'Metrics.InfluxDBEndpoint'
+
+
+YAML_JWTSECRET_KEYWORD = 'jwt-secret'
+YAML_DATADIR_KEYWORD = 'datadir'
+YAML_MINSYNCPEERS_KEYWORD = 'min-sync-peers'
+YAML_GENESIS_STATE_KEYWORD = 'genesis-state'
+YAML_CHAIN_CONFIG_FILE_KEYWORD = 'chain-config-file'
+YAML_CONTRACT_DEPLOYMENT_BLOCK_KEYWORD = 'contract-deployment-block'
+YAML_CHAIN_ID_KEYWORD = 'chain-id'
+YAML_RPC_HOST_KEYWORD = 'rpc-host'
+YAML_RPC_PORT_KEYWORD = 'rpc-port'
+YAML_GRPC_GATEWAY_HOST_KEYWORD = 'grpc-gateway-host'
+YAML_GRPC_GATEWAY_PORT_KEYWORD = 'grpc-gateway-port'
+YAML_EXECUTION_ENDPOINT_KEYWORD = 'execution-endpoint'
+YAML_ACCEPT_TERMS_OF_USE_KEYWORD = 'accept-terms-of-use'
+YAML_SUGGESTED_FEE_RECIPIENT_KEYWORD = 'suggested-fee-recipient'
+YAML_MINIMUM_PEERS_PER_SUBNET_KEYWORD = 'minimum-peers-per-subnet'
+YAML_P2P_TCP_PORT_KEYWORD = 'p2p-tcp-port'
+YAML_P2P_UDP_PORT_KEYWORD = 'p2p-udp-port'
+YAML_MONITOR_PORT_KEYWORD = 'monitoring-port'
+YAML_VERBOSITY_KEYWORD = 'verbosity'
+YAML_LOG_FORMAT_KEYWORD = 'log-format'
+YAML_LOG_FILES_KEYWORD = 'log.files'
+YAML_SLASHER_KEYWORD = 'slasher'

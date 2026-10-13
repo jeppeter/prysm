@@ -23,6 +23,7 @@ from tomlex import TomlEx
 from strop import rand_buffer
 from procop import ProcExpolore
 from key_word import *
+from yamlex import YamlEx
 
 
 class ArgsForge(object):
@@ -107,6 +108,14 @@ def get_prysm_bin(args,n):
     if is_windows():
         retval += '.exe'
     return retval
+
+def geth_dir_file(args,username,partfile):
+    retfile = os.path.join(args.gethdatadir,'datadir_%s'%(username),partfile)
+    return retfile
+
+def datadir_file(args,username,partfile):
+    retfile = os.path.join(args.datadir,'datadir_%s'%(username),partfile)
+    return retfile
 
 def compile_bin(args,d):
     outf = os.path.join(args.topdir,'cmd',d,d)
@@ -277,6 +286,81 @@ def genssz_handler(args,parser):
         sys.exit(3)
     sys.exit(0)
 
+def make_beacon_config_file(args,username,rdict,startport):
+    # first to get the toml file
+    curport = startport
+    tomlfile = geth_dir_file(args,username,'%s.toml'%(username))
+    yamlfile = datadir_file(args,username,'beacon_config.yaml')
+    chaincfgfile = datadir_file(args,username,'genesis_config.yaml')
+    ydatadir = os.path.dirname(datadir_file(args,username,'empty'))
+    logfile = datadir_file(args,username,'%s.log'%(username))
+    make_directory_safe(ydatadir)
+    ins = read_file(tomlfile)
+    tex = TomlEx()
+    tex.loads(ins)
+    # now to get the values
+    yex = YamlEx()
+    jwtsec = tex.get_value(NODE_JWTSECRET_KEYWORD)
+    if jwtsec is None:
+        raise Exception('can not get %s in %s'%(NODE_JWTSECRET_KEYWORD,tomlfile))
+    yex.set_value(YAML_JWTSECRET_KEYWORD,jwtsec)
+    yex.set_value(YAML_DATADIR_KEYWORD,ydatadir)
+    cnt = 0
+    for k in rdict.keys():
+        cnt += 1
+    cnt += 1
+    cnt = int(cnt / 2)
+    yex.set_value(YAML_MINSYNCPEERS_KEYWORD,cnt)
+    sszfile = datadir_file(args,username,'genesis.ssz')
+    origfile = os.path.join(args.datadir,'genesis.ssz')
+    shutil.copyfile(origfile,sszfile)
+    yex.set_value(YAML_GENESIS_STATE_KEYWORD,sszfile)
+    shutil.copyfile(args.chainconfigfile,chaincfgfile)
+    yex.set_value(YAML_CHAIN_CONFIG_FILE_KEYWORD,chaincfgfile)
+    yex.set_value(YAML_CONTRACT_DEPLOYMENT_BLOCK_KEYWORD,0)
+    yex.set_value(YAML_CHAIN_ID_KEYWORD,args.networkid)
+    yex.set_value(YAML_RPC_HOST_KEYWORD,'127.0.0.1')
+    yex.set_value(YAML_RPC_PORT_KEYWORD,curport)
+    curport += 1
+    yex.set_value(YAML_GRPC_GATEWAY_HOST_KEYWORD,'127.0.0.1')
+    yex.set_value(YAML_GRPC_GATEWAY_PORT_KEYWORD,curport)
+    curport += 1
+    authhost = tex.get_value(NODE_AUTHADDR_KEYWORD)
+    authport = tex.get_value(NODE_AUTHPORT_KEYWORD)
+    if authhost is None or authport is None:
+        raise Exception('[%s] or [%s] not in %s'%(NODE_AUTHADDR_KEYWORD,NODE_AUTHPORT_KEYWORD,tomlfile))
+    yex.set_value(YAML_EXECUTION_ENDPOINT_KEYWORD,'http://%s:%d'%(authhost,authport))
+    yex.set_value(YAML_ACCEPT_TERMS_OF_USE_KEYWORD,True)
+    yex.set_value(YAML_SUGGESTED_FEE_RECIPIENT_KEYWORD,'0x20')
+    yex.set_value(YAML_MINIMUM_PEERS_PER_SUBNET_KEYWORD,0)
+    yex.set_value(YAML_P2P_TCP_PORT_KEYWORD,curport)
+    yex.set_value(YAML_P2P_UDP_PORT_KEYWORD,curport)
+    curport += 1
+    yex.set_value(YAML_MONITOR_PORT_KEYWORD,curport)
+    curport += 1
+    yex.set_value(YAML_VERBOSITY_KEYWORD,'trace')
+    yex.set_value(YAML_LOG_FORMAT_KEYWORD,'simple')
+    yex.set_value(YAML_LOG_FILES_KEYWORD,[logfile])
+    yex.set_value(YAML_SLASHER_KEYWORD,True)
+    outs = yex.dumps()
+    write_file(outs,yamlfile)
+    return curport
+
+
+def startbeacon_handler(args,parser):
+    set_logging(args)
+    ins = read_file(args.subnargs[0])
+    rdict = json.loads(ins)
+    keys = []
+    for k in rdict.keys():
+        keys.append(k)
+    # now to make sure every key
+    startport = 8200
+    for k in keys:
+        make_beacon_config_file(args,k,rdict,startport)
+        startport += 20
+    sys.exit(0)
+
 def load_base_parser(parser):
     commandline_fmt='''
     {
@@ -307,6 +391,9 @@ def load_base_parser(parser):
         },
         "genssz<%s.genssz_handler>##to make genesis ssz##" : {
             "$" : 0
+        },
+        "startbeacon<%s.startbeacon_handler>##listjson to start beacon for list##" : {
+            "$" : 1
         }
     }
     '''
@@ -339,7 +426,7 @@ def load_base_parser(parser):
             forks += ','
         forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__,__name__)
     parser.load_command_line_string(commandline)
     return parser
 
