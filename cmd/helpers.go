@@ -3,8 +3,10 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -133,4 +135,101 @@ func ParseVModule(input string) (map[string]logrus.Level, logrus.Level, error) {
 	}
 
 	return result, maxLevel, nil
+}
+
+func FormatTab(tab int) (outs string) {
+	outs = ""
+	for i := 0; i < tab; i += 1 {
+		outs += "    "
+	}
+	return
+}
+
+func IterCommand(writer io.Writer, ctx *cli.Context, cmd *cli.Command, tab int) (err error) {
+	var outs string
+	outs = FormatTab(tab)
+	outs += fmt.Sprintf("Command [%s]\n", cmd.Name)
+
+	writer.Write([]byte(outs))
+	for _, flg := range cmd.Flags {
+		err = IterFlags(writer, ctx, flg, tab+1)
+		if err != nil {
+			return
+		}
+	}
+
+	for _, subcmd := range cmd.Subcommands {
+		err = IterCommand(writer, ctx, subcmd, tab+1)
+		if err != nil {
+			return
+		}
+	}
+	err = nil
+	return
+}
+
+func IterFlags(writer io.Writer, ctx *cli.Context, flags cli.Flag, tab int) (err error) {
+	var outs string
+	var val interface{}
+	var flgname string
+	var types string
+
+	flgname = flags.Names()[0]
+	if ctx.IsSet(flgname) {
+		val = ctx.Value(flgname)
+		types = reflect.TypeOf(val).String()
+		outs = FormatTab(tab)
+		outs += fmt.Sprintf("Flag %s.(%s) [%v]\n", flgname, types, val)
+		writer.Write([]byte(outs))
+	} else {
+		outs = FormatTab(tab)
+		outs += fmt.Sprintf("Flag %s not set\n", flgname)
+		writer.Write([]byte(outs))
+	}
+	err = nil
+	return
+}
+
+func IterContext(ctx *cli.Context, owriter io.Writer) (err error) {
+	err = IterCommand(owriter, ctx, ctx.Command, 0)
+	if err != nil {
+		return
+	}
+
+	for _, cmd := range ctx.App.Commands {
+		err = IterCommand(owriter, ctx, cmd, 0)
+		if err != nil {
+			return
+		}
+	}
+
+	for _, flg := range ctx.App.Flags {
+		err = IterFlags(owriter, ctx, flg, 0)
+		if err != nil {
+			return
+		}
+	}
+
+	var cnt int
+	var outs string
+	cnt = ctx.Args().Len()
+	outs = FormatTab(0)
+	outs += fmt.Sprintf("Args %d\n", cnt)
+	owriter.Write([]byte(outs))
+	if cnt > 0 {
+		outs = FormatTab(1)
+	}
+
+	for i := 0; i < cnt; i += 1 {
+		if i > 0 {
+			outs += ","
+		}
+		outs += ctx.Args().Get(i)
+	}
+	if cnt > 0 {
+		outs += "\n"
+		owriter.Write([]byte(outs))
+	}
+	err = nil
+	return
 }

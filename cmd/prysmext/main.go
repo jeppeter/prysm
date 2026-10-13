@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	_ "fmt"
 	"github.com/OffchainLabs/prysm/v7/cmd"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/checkenv"
 	"github.com/OffchainLabs/prysm/v7/cmd/prysmext/expforkname"
@@ -75,7 +75,6 @@ func main() {
 			}
 
 			logapps := ctx.StringSlice(cmd.LogappendFlag.Name)
-			fmt.Fprintf(os.Stderr, "LogappendFlag %v\n", logapps)
 			if len(logapps) > 0 {
 				for _, n := range logapps {
 					var curf *os.File
