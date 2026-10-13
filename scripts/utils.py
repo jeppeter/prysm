@@ -393,6 +393,9 @@ def stopbeacon_handler(args,parser):
     verbose_zero = False
     if args.verbose == 0:
         verbose_zero = True
+
+    if verbose_zero:
+        sys.stdout.write('current %s\n'%(os.getpid()))
     ps = ProcExpolore()
     errcnt = 0
     while True:
@@ -405,23 +408,43 @@ def stopbeacon_handler(args,parser):
         for k,v in res.items():
             if is_windows():
                 if v.firstarg == 'beacon-chain.exe' or v.firstarg.endswith('\\beacon-chain.exe'):
+                    if verbose_zero:
+                        try:
+                            sys.stdout.write('add [%s]\n'%(k))
+                        except:
+                            pass
                     pids.append(k)
             else:
                 if v.firstarg == 'beacon-chain' or v.firstarg.endswith('/beacon-chain'):
+                    if verbose_zero:
+                        try:
+                            sys.stdout.write('add [%s]\n'%(k))
+                        except:
+                            pass
                     pids.append(k)
         if len(pids) == 0:
-            break
-        for p in pids:
             if verbose_zero:
-                sys.stdout.write('[%s]\n'%(p))
+                try:
+                    sys.stdout.write('pids []\n')
+                except:
+                    pass
+            break
+        idx = 0
+        while idx < len(pids):
+            p = pids[idx]
+            if verbose_zero:
+                try:
+                    sys.stdout.write('[%s]\n'%(p))
+                except:
+                    logging.error('%s'%(traceback.format_exc()))
             try:
                 if is_windows():
                     os.kill(p,signal.CTRL_C_EVENT)
                 else:
                     os.kill(p,signal.SIGINT)
             except:
-                if errcnt > 3:
-                    logging.error('%s'%(traceback.format_exc()))
+                logging.error('%s'%(traceback.format_exc()))
+            idx += 1
     sys.exit(0)
 
 def load_base_parser(parser):
