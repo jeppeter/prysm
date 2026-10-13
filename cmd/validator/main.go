@@ -25,6 +25,7 @@ import (
 	"github.com/OffchainLabs/prysm/v7/runtime/debug"
 	prefixed "github.com/OffchainLabs/prysm/v7/runtime/logging/logrus-prefixed-formatter"
 	_ "github.com/OffchainLabs/prysm/v7/runtime/maxprocs"
+	"github.com/OffchainLabs/prysm/v7/runtime/simpleformatter"
 	"github.com/OffchainLabs/prysm/v7/runtime/tos"
 	"github.com/OffchainLabs/prysm/v7/runtime/version"
 	"github.com/OffchainLabs/prysm/v7/validator/node"
@@ -91,6 +92,8 @@ var appFlags = []cli.Flag{
 	cmd.MinimalConfigFlag,
 	cmd.E2EConfigFlag,
 	cmd.VerbosityFlag,
+	cmd.LogfilesFlag,
+	cmd.LogappendFlag,
 	cmd.LogVModuleFlag,
 	cmd.DataDirFlag,
 	cmd.ClearDB,
@@ -143,6 +146,11 @@ func main() {
 		Flags:                appFlags,
 		EnableBashCompletion: true,
 		Before: func(ctx *cli.Context) error {
+			var formatter *simpleformatter.SimpleFormatter = &simpleformatter.SimpleFormatter{}
+			formatter.DebugFileLine = false
+			formatter.TimeFormat = false
+			formatter.LevelFormat = true
+			formatter.PackageFormat = false
 			// Load flags from config file, if specified.
 			if err := cmd.LoadFlagsFromConfig(ctx, appFlags); err != nil {
 				return err
@@ -150,6 +158,12 @@ func main() {
 
 			// determine default log verbosity
 			verbosity := ctx.String(cmd.VerbosityFlag.Name)
+			if verbosity == "trace" || verbosity == "info" || verbosity == "warn" {
+				formatter.DebugFileLine = true
+				formatter.PackageFormat = true
+				formatter.TimeFormat = true
+				logrus.SetReportCaller(true)
+			}
 			verbosityLevel, err := logrus.ParseLevel(verbosity)
 			if err != nil {
 				return errors.Wrap(err, "failed to parse log verbosity")
@@ -219,6 +233,8 @@ func main() {
 				if err := journald.Enable(verbosityLevel); err != nil {
 					return err
 				}
+			case "simple":
+				logrus.SetFormatter(formatter)
 			default:
 				return fmt.Errorf("unknown log format %s", format)
 			}
@@ -255,6 +271,12 @@ func main() {
 				return errors.Wrap(err, "provided multiple network flags")
 			}
 
+			var owriter strings.Builder
+			err = cmd.IterContext(ctx, &owriter)
+			if err != nil {
+				return err
+			}
+			log.Debugf("%s", owriter.String())
 			return cmd.ValidateNoArgs(ctx)
 		},
 	}

@@ -346,6 +346,47 @@ def make_beacon_config_file(args,username,rdict,startport):
     write_file(outs,yamlfile)
     return curport
 
+def make_validator_config_file(args,username,startport,startidx):
+    beaconcfg = datadir_file(args,username,'beacon_config.yaml')
+    validaotrcfg = datadir_file(args,username,'validator_config.yaml')
+    validatordir = datadir_file(args,username,'validatordir')
+    chaincfgfile = datadir_file(args,username,'genesis_config.yaml')
+    logfile = datadir_file(args,username,'validator_%s.log'%(username))
+    byex = YamlEx()
+    ins = read_file(beaconcfg)
+    byex.loads(ins)
+    vyex = YamlEx()
+    rpcport = byex.get_value(YAML_RPC_PORT_KEYWORD)
+    rpchost = byex.get_value(YAML_RPC_HOST_KEYWORD)
+    if rpcport is None or rpchost is None:
+        raise Exception('%s not set [%s] or [%s]'%(beaconcfg,YAML_RPC_HOST_KEYWORD,YAML_RPC_PORT_KEYWORD))
+    vyex.set_value(YAML_VALIDATOR_BEACON_RPC_PROVIDER_KEYWORD,'%s:%s'%(rpchost,rpcport))
+    vyex.set_value(YAML_DATADIR_KEYWORD,validatordir)
+    vyex.set_value(YAML_ACCEPT_TERMS_OF_USE_KEYWORD,True)
+    vyex.set_value(YAML_INTEROP_NUM_VALIDATORS_KEYWORD,1)
+    curport = startport
+    vyex.set_value(YAML_INTEROP_START_IDX_KEYWORD,startidx)
+    vyex.set_value(YAML_RPC_PORT_KEYWORD,curport)
+    curport += 1
+    vyex.set_value(YAML_GRPC_GATEWAY_PORT_KEYWORD,curport)
+    curport += 1
+    vyex.set_value(YAML_MONITOR_PORT_KEYWORD,curport)
+    curport += 1
+    vyex.set_value(YAML_GRAFFITI_KEYWORD,'node-%d'%(startidx))
+    if not os.path.exists(chaincfgfile):
+        shutil.copyfile(args.chainconfigfile,chaincfgfile)
+    vyex.set_value(YAML_CHAIN_CONFIG_FILE_KEYWORD,chaincfgfile)
+    vyex.set_value(YAML_LOG_FILES_KEYWORD,[logfile])
+    vyex.set_value(YAML_LOG_FORMAT_KEYWORD,'simple')
+    vyex.set_value(YAML_VERBOSITY_KEYWORD,'trace')
+    outs = vyex.dumps()
+    write_file(outs,validaotrcfg)
+    return curport
+
+
+
+
+
 
 def start_beacon(args,username):
     beaconcfg = datadir_file(args,username,'beacon_config.yaml')
@@ -370,6 +411,31 @@ def start_beacon(args,username):
         p = subprocess.Popen(cmds,stdout=devnullfile,stderr=devnullfile)
     return p
 
+def start_validator(args,username):
+    validatorcfg = datadir_file(args,username,'validator_config.yaml')
+    cmds = []
+    cmds.append(get_prysm_bin(args,'validator'))
+    cmds.append('--config-file')
+    cmds.append(validatorcfg)
+    devnullfile = open(os.devnull,'wb')
+    if is_windows():
+        flags = 0
+        flags |= 0x00000008  # DETACHED_PROCESS
+        flags |= 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        flags |= 0x08000000  # CREATE_NO_WINDOW
+
+        pkwargs = {
+            'close_fds': True,  # close stdin/stdout/stderr on child
+            'creationflags': flags,
+        }
+        logging.info('cmds %s'%(cmds))
+        p = subprocess.Popen(cmds,stdout=devnullfile,stderr=devnullfile)
+    else:
+        logging.info('cmds %s'%(cmds))
+        p = subprocess.Popen(cmds,stdout=devnullfile,stderr=devnullfile)
+    return p
+
+
 def startbeacon_handler(args,parser):
     set_logging(args)
     ins = read_file(args.subnargs[0])
@@ -388,8 +454,32 @@ def startbeacon_handler(args,parser):
             sys.stdout.write('beacon-chain [%d]\n'%(p.pid))
     sys.exit(0)
 
-def stopbeacon_handler(args,parser):
+def startvalidator_handler(args,parser):
     set_logging(args)
+    verbose_zero = False
+    if args.verbose == 0:
+        verbose_zero = True
+    ins = read_file(args.subnargs[0])
+    rdict = json.loads(ins)
+    keys = []
+    for k in rdict.keys():
+        keys.append(k)
+    # now to make sure every key
+    startport = 9200
+    idx = 0
+    for k in keys:
+        make_validator_config_file(args,k,startport,idx)
+        startport += 20
+        idx += 1
+
+    for k in keys:
+        p = start_validator(args,k)
+        if verbose_zero:
+            sys.stdout.write('validator [%d]\n'%(p.pid))
+    sys.exit(0)
+    return
+
+def kill_proc_inner(args,progname):
     verbose_zero = False
     if args.verbose == 0:
         verbose_zero = True
@@ -407,7 +497,7 @@ def stopbeacon_handler(args,parser):
         res = ps.get_result()
         for k,v in res.items():
             if is_windows():
-                if v.firstarg == 'beacon-chain.exe' or v.firstarg.endswith('\\beacon-chain.exe'):
+                if v.firstarg == '%s.exe'%(progname) or v.firstarg.endswith('\\%s.exe'%(progname)):
                     if verbose_zero:
                         try:
                             sys.stdout.write('add [%s]\n'%(k))
@@ -415,7 +505,7 @@ def stopbeacon_handler(args,parser):
                             pass
                     pids.append(k)
             else:
-                if v.firstarg == 'beacon-chain' or v.firstarg.endswith('/beacon-chain'):
+                if v.firstarg == '%s'%(progname) or v.firstarg.endswith('/%s'%(progname)):
                     if verbose_zero:
                         try:
                             sys.stdout.write('add [%s]\n'%(k))
@@ -445,7 +535,17 @@ def stopbeacon_handler(args,parser):
             except:
                 logging.error('%s'%(traceback.format_exc()))
             idx += 1
+
+def stopbeacon_handler(args,parser):
+    set_logging(args)
+    kill_proc_inner(args,'beacon-chain')
     sys.exit(0)
+
+def stopvalidator_handler(args,parser):
+    set_logging(args)
+    kill_proc_inner(args,'validator')
+    sys.exit(0)
+
 
 def load_base_parser(parser):
     commandline_fmt='''
@@ -483,6 +583,12 @@ def load_base_parser(parser):
         },
         "stopbeacon<%s.stopbeacon_handler>##to stop beacon running##" : {
             "$" : 0
+        },
+        "startvalidator<%s.startvalidator_handler>##listjson to start validator##" : {
+            "$" : 1
+        },
+        "stopvalidator<%s.stopvalidator_handler>##to stop beacon running##" : {
+            "$" : 0
         }
     }
     '''
@@ -515,7 +621,7 @@ def load_base_parser(parser):
             forks += ','
         forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__,__name__,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__,__name__,__name__,__name__,__name__)
     parser.load_command_line_string(commandline)
     return parser
 

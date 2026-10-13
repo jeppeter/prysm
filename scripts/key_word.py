@@ -48,3 +48,8 @@ YAML_VERBOSITY_KEYWORD = 'verbosity'
 YAML_LOG_FORMAT_KEYWORD = 'log-format'
 YAML_LOG_FILES_KEYWORD = 'log.files'
 YAML_SLASHER_KEYWORD = 'slasher'
+
+YAML_VALIDATOR_BEACON_RPC_PROVIDER_KEYWORD = 'beacon-rpc-provider'
+YAML_INTEROP_NUM_VALIDATORS_KEYWORD = 'interop-num-validators'
+YAML_INTEROP_START_IDX_KEYWORD = 'interop-start-index'
+YAML_GRAFFITI_KEYWORD = 'graffiti'
