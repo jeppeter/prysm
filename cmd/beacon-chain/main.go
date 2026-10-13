@@ -33,6 +33,7 @@ import (
 	"github.com/OffchainLabs/prysm/v7/runtime/fdlimits"
 	prefixed "github.com/OffchainLabs/prysm/v7/runtime/logging/logrus-prefixed-formatter"
 	_ "github.com/OffchainLabs/prysm/v7/runtime/maxprocs"
+	"github.com/OffchainLabs/prysm/v7/runtime/simpleformatter"
 	"github.com/OffchainLabs/prysm/v7/runtime/tos"
 	"github.com/OffchainLabs/prysm/v7/runtime/version"
 	gethlog "github.com/ethereum/go-ethereum/log"
@@ -113,6 +114,8 @@ var appFlags = []cli.Flag{
 	cmd.PubsubQueueSize,
 	cmd.DataDirFlag,
 	cmd.VerbosityFlag,
+	cmd.LogfilesFlag,
+	cmd.LogappendFlag,
 	cmd.LogVModuleFlag,
 	cmd.EnableTracingFlag,
 	cmd.TracingProcessNameFlag,
@@ -172,6 +175,11 @@ func init() {
 }
 
 func before(ctx *cli.Context) error {
+	var formatter *simpleformatter.SimpleFormatter = &simpleformatter.SimpleFormatter{}
+	formatter.DebugFileLine = false
+	formatter.TimeFormat = false
+	formatter.LevelFormat = true
+	formatter.PackageFormat = false
 	// Load flags from config file, if specified.
 	if err := cmd.LoadFlagsFromConfig(ctx, appFlags); err != nil {
 		return errors.Wrap(err, "failed to load flags from config file")
@@ -179,6 +187,12 @@ func before(ctx *cli.Context) error {
 
 	// determine default log verbosity
 	verbosity := ctx.String(cmd.VerbosityFlag.Name)
+	if verbosity == "trace" || verbosity == "info" || verbosity == "warn" {
+		formatter.DebugFileLine = true
+		formatter.PackageFormat = true
+		formatter.TimeFormat = true
+		logrus.SetReportCaller(true)
+	}
 	verbosityLevel, err := logrus.ParseLevel(verbosity)
 	if err != nil {
 		return errors.Wrap(err, "failed to parse log verbosity")
@@ -193,6 +207,33 @@ func before(ctx *cli.Context) error {
 
 	// set the global logging level and data
 	logs.SetLoggingLevelAndData(verbosityLevel, vmodule, maxLevel, ctx.Bool(flags.DisableEphemeralLogFile.Name))
+
+	logfs := ctx.StringSlice(cmd.LogfilesFlag.Name)
+	var outf []io.Writer = []io.Writer{os.Stderr}
+	if len(logfs) > 0 {
+		for _, n := range logfs {
+			var curf *os.File
+			curf, err = os.OpenFile(n, os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				return err
+			}
+			outf = append(outf, curf)
+		}
+	}
+
+	logapps := ctx.StringSlice(cmd.LogappendFlag.Name)
+	if len(logapps) > 0 {
+		for _, n := range logapps {
+			var curf *os.File
+			curf, err = os.OpenFile(n, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				return err
+			}
+			outf = append(outf, curf)
+		}
+	}
+
+	logrus.SetOutput(io.MultiWriter(outf...))
 
 	format := ctx.String(cmd.LogFormat.Name)
 	switch format {
@@ -246,6 +287,8 @@ func before(ctx *cli.Context) error {
 		if err := journald.Enable(verbosityLevel); err != nil {
 			return err
 		}
+	case "simple":
+		logrus.SetFormatter(formatter)
 	default:
 		return fmt.Errorf("unknown log format %s", format)
 	}
@@ -287,6 +330,13 @@ func before(ctx *cli.Context) error {
 	if err := features.ValidateNetworkFlags(ctx); err != nil {
 		return errors.Wrap(err, "provided multiple network flags")
 	}
+
+	var owriter strings.Builder
+	err = cmd.IterContext(ctx, &owriter)
+	if err != nil {
+		return err
+	}
+	log.Debugf("%s", owriter.String())
 
 	return cmd.ValidateNoArgs(ctx)
 }
