@@ -53,3 +53,7 @@ YAML_VALIDATOR_BEACON_RPC_PROVIDER_KEYWORD = 'beacon-rpc-provider'
 YAML_INTEROP_NUM_VALIDATORS_KEYWORD = 'interop-num-validators'
 YAML_INTEROP_START_IDX_KEYWORD = 'interop-start-index'
 YAML_GRAFFITI_KEYWORD = 'graffiti'
+
+YAML_DISABLE_EPHEMERAL_LOG_FILE_KEYWORD = 'disable-ephemeral-log-file'
+
+KEYSTORE_ADDRESS_KEYWORD = 'address'

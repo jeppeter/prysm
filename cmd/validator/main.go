@@ -179,6 +179,33 @@ func main() {
 			// set the global logging level and data
 			logs.SetLoggingLevelAndData(verbosityLevel, vmodule, maxLevel, ctx.Bool(flags.DisableEphemeralLogFile.Name))
 
+			logfs := ctx.StringSlice(cmd.LogfilesFlag.Name)
+			var outf []io.Writer = []io.Writer{os.Stderr}
+			if len(logfs) > 0 {
+				for _, n := range logfs {
+					var curf *os.File
+					curf, err = os.OpenFile(n, os.O_CREATE|os.O_WRONLY, 0644)
+					if err != nil {
+						return err
+					}
+					outf = append(outf, curf)
+				}
+			}
+
+			logapps := ctx.StringSlice(cmd.LogappendFlag.Name)
+			if len(logapps) > 0 {
+				for _, n := range logapps {
+					var curf *os.File
+					curf, err = os.OpenFile(n, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+					if err != nil {
+						return err
+					}
+					outf = append(outf, curf)
+				}
+			}
+
+			logrus.SetOutput(io.MultiWriter(outf...))
+
 			logFileName := ctx.String(cmd.LogFileName.Name)
 
 			format := ctx.String(cmd.LogFormat.Name)

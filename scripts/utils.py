@@ -13,6 +13,7 @@ import json
 import signal
 import time
 import shutil
+import eth_utils
 
 sys.path.append(os.path.abspath(os.path.dirname(os.path.abspath(__file__))))
 
@@ -286,10 +287,59 @@ def genssz_handler(args,parser):
         sys.exit(3)
     sys.exit(0)
 
+def find_keystore_file(args,username):
+    keydir = os.path.join(args.gethdatadir,'datadir_%s'%(username),'keystore')
+    files = os.listdir(keydir)
+    fileexpr = re.compile('^UTC-.*$')
+    retval = None
+    for f in files:
+        if fileexpr.match(f):
+            retval = os.path.join(keydir,f)
+            break
+    return retval
+
+
+def make_address_checksum(addr_str):
+    addr = eth_utils.to_bytes(hexstr=addr_str)
+    hex_addr = addr.hex()
+    checksummed_buffer = ""
+
+    # Treat the hex address as ascii/utf-8 for keccak256 hashing
+    hashed_address = eth_utils.keccak(text=hex_addr).hex()
+
+    # Iterate over each character in the hex address
+    for nibble_index, character in enumerate(hex_addr):
+
+        if character in "0123456789":
+            # We can't upper-case the decimal digits
+            checksummed_buffer += character
+        elif character in "abcdef":
+            # Check if the corresponding hex digit (nibble) in the hash is 8 or higher
+            hashed_address_nibble = int(hashed_address[nibble_index], 16)
+            if hashed_address_nibble > 7:
+                checksummed_buffer += character.upper()
+            else:
+                checksummed_buffer += character
+        else:
+            raise eth_utils.ValidationError(
+                f"Unrecognized hex character {character!r} at position {nibble_index}"
+            )
+
+    return "0x" + checksummed_buffer
+
+
 def make_beacon_config_file(args,username,rdict,startport):
     # first to get the toml file
     curport = startport
     tomlfile = geth_dir_file(args,username,'%s.toml'%(username))
+    keyfile = find_keystore_file(args,username)
+    if keyfile is None:
+        raise Exception('can not find keystore file in %s'%(args.gethdatadir))
+    keyins = read_file(keyfile)
+    keydict = json.loads(keyins)
+    if KEYSTORE_ADDRESS_KEYWORD not in keydict.keys():
+        raise Exception('%s not in %s keystore file'%(KEYSTORE_ADDRESS_KEYWORD,keyfile))
+    keyaddress = keydict[KEYSTORE_ADDRESS_KEYWORD]
     yamlfile = datadir_file(args,username,'beacon_config.yaml')
     chaincfgfile = datadir_file(args,username,'genesis_config.yaml')
     ydatadir = os.path.dirname(datadir_file(args,username,'empty'))
@@ -331,7 +381,7 @@ def make_beacon_config_file(args,username,rdict,startport):
         raise Exception('[%s] or [%s] not in %s'%(NODE_AUTHADDR_KEYWORD,NODE_AUTHPORT_KEYWORD,tomlfile))
     yex.set_value(YAML_EXECUTION_ENDPOINT_KEYWORD,'http://%s:%d'%(authhost,authport))
     yex.set_value(YAML_ACCEPT_TERMS_OF_USE_KEYWORD,True)
-    yex.set_value(YAML_SUGGESTED_FEE_RECIPIENT_KEYWORD,'0x20')
+    yex.set_value(YAML_SUGGESTED_FEE_RECIPIENT_KEYWORD,make_address_checksum('0x%s'%(keyaddress)))
     yex.set_value(YAML_MINIMUM_PEERS_PER_SUBNET_KEYWORD,0)
     yex.set_value(YAML_P2P_TCP_PORT_KEYWORD,curport)
     yex.set_value(YAML_P2P_UDP_PORT_KEYWORD,curport)
@@ -379,6 +429,7 @@ def make_validator_config_file(args,username,startport,startidx):
     vyex.set_value(YAML_LOG_FILES_KEYWORD,[logfile])
     vyex.set_value(YAML_LOG_FORMAT_KEYWORD,'simple')
     vyex.set_value(YAML_VERBOSITY_KEYWORD,'trace')
+    vyex.set_value(YAML_DISABLE_EPHEMERAL_LOG_FILE_KEYWORD,True)
     outs = vyex.dumps()
     write_file(outs,validaotrcfg)
     return curport
