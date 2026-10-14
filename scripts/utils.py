@@ -586,6 +586,29 @@ def kill_proc_inner(args,progname):
             except:
                 logging.error('%s'%(traceback.format_exc()))
             idx += 1
+    return
+
+def list_proc_inner(args,progname):
+    ps = ProcExpolore()
+    errcnt = 0
+    retdict = dict()
+    while True:
+        pids = []
+        errcnt += 1
+        retval = ps.snapshot()
+        if not retval:
+            continue
+        res = ps.get_result()
+        for k,v in res.items():
+            if is_windows():
+                if v.firstarg == '%s.exe'%(progname) or v.firstarg.endswith('\\%s.exe'%(progname)):
+                    retdict[k] = v
+            else:
+                if v.firstarg == '%s'%(progname) or v.firstarg.endswith('/%s'%(progname)):
+                    retdict[k] = v
+        return retdict
+    return retdict
+
 
 def stopbeacon_handler(args,parser):
     set_logging(args)
@@ -597,6 +620,17 @@ def stopvalidator_handler(args,parser):
     kill_proc_inner(args,'validator')
     sys.exit(0)
 
+def listproc_handler(args,parser):
+    set_logging(args)
+    procs = ['validator','beacon-chain']
+    if len(args.subnargs) > 0:
+        procs = args.subnargs
+    for p in procs:
+        rdict = list_proc_inner(args,p)
+        for k,v in rdict.items():
+            sys.stdout.write('[%s] %s [%s]\n'%(p,k,v.cmdline))
+    sys.exit(0)
+    return
 
 def load_base_parser(parser):
     commandline_fmt='''
@@ -640,6 +674,9 @@ def load_base_parser(parser):
         },
         "stopvalidator<%s.stopvalidator_handler>##to stop beacon running##" : {
             "$" : 0
+        },
+        "listproc<%s.listproc_handler>##to list proc##" : {
+            "$" : "*"
         }
     }
     '''
@@ -672,7 +709,7 @@ def load_base_parser(parser):
             forks += ','
         forks += v
 
-    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__,__name__,__name__,__name__,__name__)
+    commandline = commandline_fmt%(repltopdir,repldatadir,replgethdir,replgethdatadir,replchainconfigfile,forks,deffork,__name__,support_bin_dir,__name__,__name__,__name__,__name__,__name__,__name__,__name__,__name__)
     parser.load_command_line_string(commandline)
     return parser
 
