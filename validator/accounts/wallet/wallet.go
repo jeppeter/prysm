@@ -11,6 +11,7 @@ import (
 	"github.com/OffchainLabs/prysm/v7/cmd/validator/flags"
 	"github.com/OffchainLabs/prysm/v7/io/file"
 	"github.com/OffchainLabs/prysm/v7/io/prompt"
+	"github.com/OffchainLabs/prysm/v7/runtime/debug"
 	"github.com/OffchainLabs/prysm/v7/validator/accounts/iface"
 	accountsprompt "github.com/OffchainLabs/prysm/v7/validator/accounts/userprompt"
 	"github.com/OffchainLabs/prysm/v7/validator/keymanager"
@@ -111,6 +112,7 @@ func Exists(walletDir string) (bool, error) {
 // IsValid checks if a folder contains a single key directory such as `derived`, `remote` or `imported`.
 // Returns true if one of those subdirectories exist, false otherwise.
 func IsValid(walletDir string) (bool, error) {
+	log.Infof("[%s]WalletDir %s", debug.GetCallerString(1), walletDir)
 	expanded, err := file.ExpandPath(walletDir)
 	if err != nil {
 		return false, err

@@ -19,6 +19,7 @@ import (
 	walletcommands "github.com/OffchainLabs/prysm/v7/cmd/validator/wallet"
 	"github.com/OffchainLabs/prysm/v7/cmd/validator/web"
 	"github.com/OffchainLabs/prysm/v7/config/features"
+	"github.com/OffchainLabs/prysm/v7/console"
 	"github.com/OffchainLabs/prysm/v7/io/file"
 	"github.com/OffchainLabs/prysm/v7/io/logs"
 	"github.com/OffchainLabs/prysm/v7/monitoring/journald"
@@ -146,6 +147,7 @@ func main() {
 		Flags:                appFlags,
 		EnableBashCompletion: true,
 		Before: func(ctx *cli.Context) error {
+			console.SetColorConsole(os.Stdout)
 			var formatter *simpleformatter.SimpleFormatter = &simpleformatter.SimpleFormatter{}
 			formatter.DebugFileLine = false
 			formatter.TimeFormat = false

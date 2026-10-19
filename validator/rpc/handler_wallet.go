@@ -14,6 +14,7 @@ import (
 	"github.com/OffchainLabs/prysm/v7/io/prompt"
 	"github.com/OffchainLabs/prysm/v7/monitoring/tracing/trace"
 	"github.com/OffchainLabs/prysm/v7/network/httputil"
+	"github.com/OffchainLabs/prysm/v7/runtime/debug"
 	"github.com/OffchainLabs/prysm/v7/validator/accounts"
 	"github.com/OffchainLabs/prysm/v7/validator/accounts/wallet"
 	"github.com/OffchainLabs/prysm/v7/validator/keymanager"
@@ -330,10 +331,12 @@ func (s *Server) initializeWallet(ctx context.Context, cfg *wallet.Config) error
 		return errors.Wrap(err, wallet.CheckExistsErrMsg)
 	}
 	if !exists {
+		log.Infof("[%s] ErrNoWalletFound", debug.GetCallerString(1))
 		return wallet.ErrNoWalletFound
 	}
 	valid, err := wallet.IsValid(cfg.WalletDir)
 	if errors.Is(err, wallet.ErrNoWalletFound) {
+		log.Infof("[%s] ErrNoWalletFound", debug.GetCallerString(1))
 		return wallet.ErrNoWalletFound
 	}
 	if err != nil {

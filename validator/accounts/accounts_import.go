@@ -49,6 +49,7 @@ func (acm *CLIManager) Import(ctx context.Context) error {
 
 	var accountsPassword string
 	if acm.readPasswordFile {
+		log.Infof("acm.passwordFilePath %s", acm.passwordFilePath)
 		data, err := os.ReadFile(acm.passwordFilePath) // #nosec G304
 		if err != nil {
 			return err

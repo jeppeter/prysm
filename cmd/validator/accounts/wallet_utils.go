@@ -3,6 +3,7 @@ package accounts
 import (
 	"strings"
 
+	"github.com/OffchainLabs/prysm/v7/runtime/debug"
 	"github.com/OffchainLabs/prysm/v7/validator/accounts"
 	"github.com/OffchainLabs/prysm/v7/validator/accounts/iface"
 	"github.com/OffchainLabs/prysm/v7/validator/accounts/wallet"
@@ -13,6 +14,7 @@ import (
 
 func walletWithKeymanager(c *cli.Context) (*wallet.Wallet, keymanager.IKeymanager, error) {
 	w, err := wallet.OpenWalletOrElseCli(c, func(cliCtx *cli.Context) (*wallet.Wallet, error) {
+		log.Infof("walletWithKeymanager [%s]", debug.GetCallerString(1))
 		return nil, wallet.ErrNoWalletFound
 	})
 	if err != nil {
