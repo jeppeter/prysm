@@ -48,6 +48,8 @@ YAML_VERBOSITY_KEYWORD = 'verbosity'
 YAML_LOG_FORMAT_KEYWORD = 'log-format'
 YAML_LOG_FILES_KEYWORD = 'log.files'
 YAML_SLASHER_KEYWORD = 'slasher'
+YAML_WALLET_DIR_KEYWORD  = 'wallet-dir'
+YAML_WALLET_PASSWORD_FILE_KEYWORD = 'wallet-password-file'
 
 YAML_VALIDATOR_BEACON_RPC_PROVIDER_KEYWORD = 'beacon-rpc-provider'
 YAML_INTEROP_NUM_VALIDATORS_KEYWORD = 'interop-num-validators'

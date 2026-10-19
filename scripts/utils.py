@@ -14,6 +14,7 @@ import signal
 import time
 import shutil
 import eth_utils
+import base64
 
 sys.path.append(os.path.abspath(os.path.dirname(os.path.abspath(__file__))))
 
@@ -396,12 +397,62 @@ def make_beacon_config_file(args,username,rdict,startport):
     write_file(outs,yamlfile)
     return curport
 
+def create_wallet(args,username,walletdir):
+    cmds = []
+    bpassword = rand_buffer(32)
+    password = base64.b64encode(bpassword)
+    if sys.version[0] == '3':
+        password = password.decode('utf-8')
+    passwordfile = mktemp_file('wallet_password.XXXXXXX',datadir_file(args,username,''))
+    write_file(password,passwordfile)
+    cmds.append(get_prysm_bin(args,'validator'))
+    cmds.append('--chain-config-file')
+    cmds.append(args.chainconfigfile)
+    cmds.append('wallet')
+    cmds.append('create')
+    cmds.append('--wallet-dir')
+    cmds.append(walletdir)
+    cmds.append('--wallet-password-file')
+    cmds.append(passwordfile)
+    cmds.append('--keymanager-kind')
+    cmds.append('local')
+    ndevnull =None
+    try:
+        ndevnull = open(os.devnull,'w+')
+        subprocess.check_call(cmds,stdout=ndevnull,stderr=ndevnull)
+        ndevnull.close()
+    except:
+        if ndevnull is not None:
+            ndevnull.close()
+        ndevnull = None
+        raise Exception('run %s error\n%s'%(cmds,traceback.format_exc()))
+    return passwordfile
+
+def find_wallet_password(args,username,walletdir):
+    files = os.listdir(datadir_file(args,username,''))
+    retval = None
+    walletexpr =re.compile('^wallet_password.*$')
+    for f in files:
+        if walletexpr.match(f):
+            retval = datadir_file(args,username,f)
+            break
+    return retval
+
+
+
 def make_validator_config_file(args,username,startport,startidx):
     beaconcfg = datadir_file(args,username,'beacon_config.yaml')
     validaotrcfg = datadir_file(args,username,'validator_config.yaml')
     validatordir = datadir_file(args,username,'validatordir')
     chaincfgfile = datadir_file(args,username,'genesis_config.yaml')
     logfile = datadir_file(args,username,'validator_%s.log'%(username))
+    walletdir = datadir_file(args,username,'walletdir_%s'%(username))
+    if not os.path.exists(walletdir):
+        walletpassword = create_wallet(args,username,walletdir)
+    else:
+        walletpassword = find_wallet_password(args,username,walletdir)
+    if walletpassword is None:
+        raise Exception('can not find wallet password file')
     byex = YamlEx()
     ins = read_file(beaconcfg)
     byex.loads(ins)
@@ -430,6 +481,8 @@ def make_validator_config_file(args,username,startport,startidx):
     vyex.set_value(YAML_LOG_FORMAT_KEYWORD,'simple')
     vyex.set_value(YAML_VERBOSITY_KEYWORD,'trace')
     vyex.set_value(YAML_DISABLE_EPHEMERAL_LOG_FILE_KEYWORD,True)
+    vyex.set_value(YAML_WALLET_DIR_KEYWORD,walletdir)
+    vyex.set_value(YAML_WALLET_PASSWORD_FILE_KEYWORD,walletpassword)
     outs = vyex.dumps()
     write_file(outs,validaotrcfg)
     return curport

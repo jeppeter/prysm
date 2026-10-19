@@ -46,15 +46,16 @@ func (acm *CLIManager) Import(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "unable to process directory and import keys")
 	}
+	log.Infof("keysDir [%s] keystoresImported [%d]", acm.keysDir, len(keystoresImported))
 
 	var accountsPassword string
 	if acm.readPasswordFile {
-		log.Infof("acm.passwordFilePath %s", acm.passwordFilePath)
 		data, err := os.ReadFile(acm.passwordFilePath) // #nosec G304
 		if err != nil {
 			return err
 		}
 		accountsPassword = string(data)
+		log.Infof("acm.passwordFilePath %s accountsPassword [%s]", acm.passwordFilePath, accountsPassword)
 	} else {
 		accountsPassword, err = prompt.PasswordPrompt(
 			"Enter the password for your imported accounts", prompt.NotEmpty,
@@ -165,6 +166,7 @@ func ImportAccounts(ctx context.Context, cfg *ImportAccountsConfig) ([]*keymanag
 		return statuses, nil
 	}
 	passwords := make([]string, len(cfg.Keystores))
+	log.Infof("Keystores %d", len(cfg.Keystores))
 	for i := 0; i < len(cfg.Keystores); i++ {
 		passwords[i] = cfg.AccountPassword
 	}
