@@ -6,6 +6,7 @@ import (
 	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
 	"github.com/OffchainLabs/prysm/v7/runtime/version"
 	"github.com/pkg/errors"
+	"gopkg.in/yaml.v2"
 )
 
 var configs *configset
@@ -30,6 +31,12 @@ func ByVersion(version [fieldparams.VersionLength]byte) (*BeaconChainConfig, err
 // SetActive sets the given config as active (the config that will be returned by GetActive).
 // SetActive will always overwrite any config with the same ConfigName before setting the updated value to active.
 func SetActive(c *BeaconChainConfig) error {
+	var outb []byte
+	var err error
+	outb, err = yaml.Marshal(c)
+	if err == nil {
+		log.Infof("SetActive BeaconChainConfig\n%s", string(outb))
+	}
 	return configs.setActive(c)
 }
 

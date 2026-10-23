@@ -464,9 +464,9 @@ def make_validator_config_file(args,username,startport,startidx):
     vyex.set_value(YAML_VALIDATOR_BEACON_RPC_PROVIDER_KEYWORD,'%s:%s'%(rpchost,rpcport))
     vyex.set_value(YAML_DATADIR_KEYWORD,validatordir)
     vyex.set_value(YAML_ACCEPT_TERMS_OF_USE_KEYWORD,True)
-    vyex.set_value(YAML_INTEROP_NUM_VALIDATORS_KEYWORD,1)
+    #vyex.set_value(YAML_INTEROP_NUM_VALIDATORS_KEYWORD,1)
     curport = startport
-    vyex.set_value(YAML_INTEROP_START_IDX_KEYWORD,startidx)
+    #vyex.set_value(YAML_INTEROP_START_IDX_KEYWORD,startidx)
     vyex.set_value(YAML_RPC_PORT_KEYWORD,curport)
     curport += 1
     vyex.set_value(YAML_GRPC_GATEWAY_PORT_KEYWORD,curport)

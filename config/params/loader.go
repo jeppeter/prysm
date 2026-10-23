@@ -125,6 +125,7 @@ func UnmarshalConfigFile(path string, conf *BeaconChainConfig) (*BeaconChainConf
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to read chain config file.")
 	}
+	log.Infof("load yamlFile[%s]", path)
 	return UnmarshalConfig(yamlFile, conf)
 }
 
