@@ -79,7 +79,77 @@ class ArgsForge(object):
         if self.goproxy is None:
             self.goproxy = 'https://goproxy.cn'
         return
-            
+
+def get_geth_genesis_file(args):
+    outfile = None
+    files = os.listdir(args.gethdatadir)
+    genexpr = re.compile('^genesis\\.(.*)\\.json$')
+    for f in files:
+        if genexpr.match(f):
+            outfile = os.path.join(args.gethdatadir,f)
+            break
+    if outfile is None:
+        raise Exception('no genesis file in %s'%(args.gethdatadir))
+    return outfile
+
+
+def remove_file_or_stdout(args,fname,note):
+    if not args.reserved:
+        sys.stdout.write('remove %s [%s]\n'%(note,fname))
+        os.remove(fname)
+    else:
+        sys.stdout.write('reserved %s [%s]\n'%(note,fname))
+    return
+
+
+def generate_gensis_yaml(args,outfile,depositaddress=None):
+    # now first to import first yaml
+    genfile = get_geth_genesis_file(args)
+    gens = read_file(genfile)
+    outyaml = YamlEx()
+    ins = read_file(args.chainconfigfile)
+    outyaml.loads(ins)
+    gendict = json.loads(gens)
+    if GENESIS_CONFIG not in gendict.keys() or GENESIS_CHAINID not in gendict[GENESIS_CONFIG].keys():
+        raise Exception('%s not has key [%s.%s]'%(genfile,GENESIS_CONFIG,GENESIS_CHAINID))
+    networkid = gendict[GENESIS_CONFIG][GENESIS_CHAINID]
+    outyaml.set_value(YAML_GENESIS_DEPOSITY_CHAIN_ID_KEYWORD,networkid)
+    outyaml.set_value(YAML_GENESIS_DEPOSITY_NETWORK_ID_KEYWORD,networkid)
+
+    for k in YAML_TRANS_KEYWORDS:
+        val = outyaml.get_value(k)
+        if val is not None and (isinstance(val, int)):
+            nval = []
+            curval = val
+            idx = 0
+            while curval != 0:
+                cval = curval & 0xff
+                curval = curval >> 8
+                nval.insert(0,cval) 
+                idx += 1
+            if len(nval) == 0:
+                nval.append(0)
+            outyaml.set_value(k,nval)
+    if depositaddress is not None:
+        nval = []
+        if isinstance(depositaddress,str):
+            ival = int(depositaddress,16)
+        else:
+            ival = depositaddress
+        idx = 0
+        while ival != 0:
+            curval = ival & 0xff
+            nval.insert(0,curval)
+            ival = ival >> 8
+            idx += 1
+        if len(nval) == 0:
+            nval.append(0)
+        outyaml.set_value(YAML_DEPOSIT_CONTRACT_ADDRESS_KEYWORD,nval)
+
+    outs = outyaml.dumps()
+    write_file(outs,outfile)
+    return
+
 
 def get_support_bin(topdir):
     cmddir = os.path.join(topdir,'cmd')
@@ -244,6 +314,8 @@ def generate_genesis(args,prysmctl,genin):
         raise Exception('validators %d < 2'%(validators))
     genout = os.path.join(args.datadir,'genesis.out.json')
     genssz = os.path.join(args.datadir,'genesis.ssz')
+    outyaml = mktemp_file('genesis.XXXXXX.out.yaml')
+    generate_gensis_yaml(args,outyaml)
     cmds = [prysmctl]
     cmds.append('--verbosity')
     cmds.append('trace')
@@ -254,7 +326,7 @@ def generate_genesis(args,prysmctl,genin):
     cmds.append('generate-genesis')
     cmds.append('--fork=%s'%(args.forkname))
     cmds.append('--num-validators=%d'%(validators))
-    cmds.append('--chain-config-file=%s'%(args.chainconfigfile))
+    cmds.append('--chain-config-file=%s'%(outyaml))
     cmds.append('--geth-genesis-json-in=%s'%(genin))
     cmds.append('--output-ssz=%s'%(genssz))
     cmds.append('--geth-genesis-json-out=%s'%(genout))
@@ -266,6 +338,7 @@ def generate_genesis(args,prysmctl,genin):
     except:
         retval = False
         logging.error('%s'%(traceback.format_exc()))
+    remove_file_or_stdout(args,outyaml,'generate out yaml')
 
     return retval
 
@@ -329,6 +402,8 @@ def make_address_checksum(addr_str):
     return "0x" + checksummed_buffer
 
 
+
+
 def make_beacon_config_file(args,username,rdict,startport):
     # first to get the toml file
     curport = startport
@@ -366,7 +441,7 @@ def make_beacon_config_file(args,username,rdict,startport):
     origfile = os.path.join(args.datadir,'genesis.ssz')
     shutil.copyfile(origfile,sszfile)
     yex.set_value(YAML_GENESIS_STATE_KEYWORD,sszfile)
-    shutil.copyfile(args.chainconfigfile,chaincfgfile)
+    generate_gensis_yaml(args,chaincfgfile,keyaddress)
     yex.set_value(YAML_CHAIN_CONFIG_FILE_KEYWORD,chaincfgfile)
     yex.set_value(YAML_CONTRACT_DEPLOYMENT_BLOCK_KEYWORD,0)
     yex.set_value(YAML_CHAIN_ID_KEYWORD,args.networkid)
@@ -404,10 +479,12 @@ def create_wallet(args,username,walletdir):
     if sys.version[0] == '3':
         password = password.decode('utf-8')
     passwordfile = mktemp_file('wallet_password.XXXXXXX',datadir_file(args,username,''))
+    outyaml = mktemp_file('genesis.XXXXXXX.out.yaml')
+    generate_gensis_yaml(args,outyaml)
     write_file(password,passwordfile)
     cmds.append(get_prysm_bin(args,'validator'))
     cmds.append('--chain-config-file')
-    cmds.append(args.chainconfigfile)
+    cmds.append(outyaml)
     cmds.append('wallet')
     cmds.append('create')
     cmds.append('--wallet-dir')
@@ -425,7 +502,9 @@ def create_wallet(args,username,walletdir):
         if ndevnull is not None:
             ndevnull.close()
         ndevnull = None
+        remove_file_or_stdout(args,outyaml,'genesis out yaml')
         raise Exception('run %s error\n%s'%(cmds,traceback.format_exc()))
+    remove_file_or_stdout(args,outyaml,'genesis out yaml')
     return passwordfile
 
 def find_wallet_password(args,username,walletdir):
@@ -475,7 +554,7 @@ def make_validator_config_file(args,username,startport,startidx):
     curport += 1
     vyex.set_value(YAML_GRAFFITI_KEYWORD,'node-%d'%(startidx))
     if not os.path.exists(chaincfgfile):
-        shutil.copyfile(args.chainconfigfile,chaincfgfile)
+        generate_gensis_yaml(args,chaincfgfile)
     vyex.set_value(YAML_CHAIN_CONFIG_FILE_KEYWORD,chaincfgfile)
     vyex.set_value(YAML_LOG_FILES_KEYWORD,[logfile])
     vyex.set_value(YAML_LOG_FORMAT_KEYWORD,'simple')
