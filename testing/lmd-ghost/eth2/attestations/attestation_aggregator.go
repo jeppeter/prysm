@@ -77,7 +77,7 @@ func (agor *AttestationsAggregator) createAgIfNonExists(key common.Hash256) *Agg
 	// check if we have to create a new aggregate
 	if !knownAg {
 		newAg = NewAggregatedAttestation(key)
-		log.Printf("createAgIfNonExists %s %s\n", key.String(), newAg.String())
+		log.Printf("createAgIfNonExists %s\n", newAg.String())
 		agor.LatestAggregates[key] = newAg
 	}
 	return newAg

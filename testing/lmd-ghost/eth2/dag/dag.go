@@ -5,16 +5,16 @@ import (
 	"lmd-ghost/eth2/attestations/attestation"
 	"lmd-ghost/eth2/block"
 	"lmd-ghost/eth2/common"
+	"log"
 )
 
 /// Beacon-Dag: a collection of the blocks in the canonical chain, and all its unfinalized branches.
 
 type BeaconDag struct {
-
 	ForkChoice ForkChoice
 
 	// Aggegate, the effective "latest-targets", but every attestation is grouped by block.
-	agor *attestations.AttestationsAggregator
+	agor   *attestations.AttestationsAggregator
 	synced bool
 
 	Nodes map[common.Hash256]*DagNode
@@ -29,7 +29,7 @@ type BeaconDag struct {
 func NewBeaconDag(initForkChoice InitForkChoice) *BeaconDag {
 	res := &BeaconDag{
 		synced: false,
-		Nodes: make(map[common.Hash256]*DagNode),
+		Nodes:  make(map[common.Hash256]*DagNode),
 	}
 	res.ForkChoice = initForkChoice(res)
 	res.agor = attestations.NewAttestationsAggregator(func(blockHash common.Hash256) (uint64, bool) {
@@ -46,14 +46,14 @@ func (dag *BeaconDag) BlockIn(block *block.BeaconBlock) {
 	dag.synced = false
 	// Create a node in the DAG for the block
 	node := &DagNode{
-		Parent: dag.Nodes[block.ParentHash],
+		Parent:   dag.Nodes[block.ParentHash],
 		Proposer: block.Proposer,
 		// expected branch factor is 2 (??), capacity of 8 should be fine? (TODO)
 		Children: make([]*DagNode, 0, 8),
-		Key: block.Hash,
-		Slot: block.Slot,
-		Height: 0,
-		Weight: 0,
+		Key:      block.Hash,
+		Slot:     block.Slot,
+		Height:   0,
+		Weight:   0,
 	}
 	// append to parent's children if there is a parent
 	if node.Parent != nil {
@@ -110,6 +110,7 @@ func (dag *BeaconDag) SyncChanges() {
 			v.PrevWeight = v.Weight
 			// remember the change, append it to our "to do" list of changes
 			changes = append(changes, ScoreChange{Target: dag.Nodes[k], ScoreDelta: delta})
+			log.Printf("append %s\n", changes[len(changes)-1].String())
 		}
 	}
 	dag.ForkChoice.ApplyScoreChanges(changes)
