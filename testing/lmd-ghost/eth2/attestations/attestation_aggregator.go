@@ -1,14 +1,15 @@
 package attestations
 
 import (
+	"fmt"
 	"lmd-ghost/eth2/attestations/attestation"
 	"lmd-ghost/eth2/common"
+	"log"
 )
 
 type SlotLookupFn func(blockHash common.Hash256) (uint64, bool)
 
 type AggregatedAttestation struct {
-
 	Target common.Hash256
 	Weight uint64
 	// Remember previous weight, if prev != current, then there was a change,
@@ -18,15 +19,20 @@ type AggregatedAttestation struct {
 	// TODO: could contain a list signatures or something.
 }
 
+func (ag *AggregatedAttestation) String() (rets string) {
+	rets = ""
+	rets += fmt.Sprintf("AggregatedAttestation[Target %s Weight 0x%x PrevWeight 0x%x]", ag.Target.String(), ag.Weight, ag.PrevWeight)
+	return
+}
+
 func NewAggregatedAttestation(target common.Hash256) *AggregatedAttestation {
 	res := &AggregatedAttestation{
-		Target: target,
-		Weight: 0,
+		Target:     target,
+		Weight:     0,
 		PrevWeight: 0,
 	}
 	return res
 }
-
 
 func (at *AggregatedAttestation) UpdateAttestation(atIn *attestation.Attestation, atOut *attestation.Attestation) {
 	// TODO: does signer list need to be updated, if only the weight changed?
@@ -60,8 +66,8 @@ type AttestationsAggregator struct {
 func NewAttestationsAggregator(slotLookup SlotLookupFn) *AttestationsAggregator {
 	res := &AttestationsAggregator{
 		LatestAggregates: make(map[common.Hash256]*AggregatedAttestation),
-		LatestTargets: make(map[common.ValidatorID]*attestation.Attestation),
-		SlotLookup: slotLookup,
+		LatestTargets:    make(map[common.ValidatorID]*attestation.Attestation),
+		SlotLookup:       slotLookup,
 	}
 	return res
 }
@@ -71,6 +77,7 @@ func (agor *AttestationsAggregator) createAgIfNonExists(key common.Hash256) *Agg
 	// check if we have to create a new aggregate
 	if !knownAg {
 		newAg = NewAggregatedAttestation(key)
+		log.Printf("createAgIfNonExists %s %s\n", key.String(), newAg.String())
 		agor.LatestAggregates[key] = newAg
 	}
 	return newAg
@@ -78,6 +85,7 @@ func (agor *AttestationsAggregator) createAgIfNonExists(key common.Hash256) *Agg
 
 func (agor *AttestationsAggregator) AttestationIn(atIn *attestation.Attestation) {
 	prevContrib, hasPrevContrib := agor.LatestTargets[atIn.Attester]
+	log.Printf("atIn %s hasPrevContrib %v\n", atIn.String(), hasPrevContrib)
 	if hasPrevContrib {
 
 		prevAg := agor.LatestAggregates[prevContrib.BeaconBlockRoot]

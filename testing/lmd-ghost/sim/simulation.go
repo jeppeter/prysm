@@ -18,16 +18,14 @@ import (
 	"math/rand"
 )
 
-
-var forkRules = map[string]dag.InitForkChoice {
-	"spec": spec.NewSpecLMDGhost,
-	"vitalik": vitalik.NewVitaliksOptimizedLMDGhost,
-	"cached": cached.NewCachedLMDGhost,
+var forkRules = map[string]dag.InitForkChoice{
+	"spec":             spec.NewSpecLMDGhost,
+	"vitalik":          vitalik.NewVitaliksOptimizedLMDGhost,
+	"cached":           cached.NewCachedLMDGhost,
 	"simple_back_prop": simple_back_prop.NewSimpleBackPropLMDGhost,
-	"stateful": stateful.NewStatefulLMDGhost,
-	"proto_array": proto_array.NewProtoArrayLMDGhost,
+	"stateful":         stateful.NewStatefulLMDGhost,
+	"proto_array":      proto_array.NewProtoArrayLMDGhost,
 }
-
 
 type Simulation struct {
 	RNG *rand.Rand
@@ -43,9 +41,9 @@ func NewSimulation(c *SimConfig) *Simulation {
 
 	genesisBlock := &block.BeaconBlock{
 		ParentHash: common.Hash256{0},
-		Hash: common.Hash256{1},
-		Proposer: 0,
-		Slot: constants.GENESIS_SLOT,
+		Hash:       common.Hash256{1},
+		Proposer:   0,
+		Slot:       constants.GENESIS_SLOT,
 	}
 
 	ch, err := chain.NewBeaconChain(genesisBlock, initForkChoice)
@@ -54,14 +52,14 @@ func NewSimulation(c *SimConfig) *Simulation {
 	}
 
 	s := &Simulation{
-		RNG:        rand.New(rand.NewSource(1234)),
-		Chain: ch,
+		RNG:    rand.New(rand.NewSource(1234)),
+		Chain:  ch,
 		Config: c,
 	}
 	return s
 }
 
-/// Goes up (towards slot 0) the tree by a few steps (upCount, more with more latency) and then back down a random path.
+// / Goes up (towards slot 0) the tree by a few steps (upCount, more with more latency) and then back down a random path.
 func (s *Simulation) getRandomTarget() *dag.DagNode {
 	upCount := 0
 	target := s.Chain.Dag.Nodes[s.Chain.Head]
@@ -138,6 +136,7 @@ func (s *Simulation) SimNewAttestation() {
 
 	// make the attestation happen
 	at := &attestation.Attestation{BeaconBlockRoot: target.Key, Attester: attester, Weight: uint64(weight)}
+	log.Printf("new Attestation %s\n", at.String())
 	if err := s.Chain.AttestationIn(at); err != nil {
 		panic("Could not insert simulated attestation")
 	}
@@ -161,39 +160,47 @@ func (s *Simulation) RunSim() {
 	}
 	for n := uint64(0); n < s.Config.Blocks; n++ {
 		head := s.Chain.Dag.Nodes[s.Chain.Head]
+		log.Printf("[%d] head %s\n", n, head.String())
 		epoch := head.Slot / constants.EPOCH_LENGTH
 		if epoch > s.Config.FinalizeEpochsAgo {
+			log.Printf("epoch 0x%x < FinalizeEpochsAgo 0x%x\n", epoch, s.Config.FinalizeEpochsAgo)
 			finalizedEpoch := epoch - s.Config.FinalizeEpochsAgo
 			if finalizedEpoch > s.Chain.Dag.Finalized.Slot/constants.EPOCH_LENGTH {
 				f := s.Chain.Dag.Justified
 				for f != nil && f.Slot/constants.EPOCH_LENGTH > finalizedEpoch {
+					log.Printf("f %s > finalizedEpoch 0x%x\n", f.String(), finalizedEpoch)
 					f = f.Parent
 				}
 				if f != nil && f != s.Chain.Dag.Finalized {
+					log.Printf("f %s Finalized", f.String())
 					s.Chain.Dag.Finalize(f.Key)
 				}
 			}
 		}
 		if epoch > s.Config.JustifyEpochsAgo {
+			log.Printf("epoch 0x%x > JustifyEpochsAgo 0x%x\n", epoch, s.Config.JustifyEpochsAgo)
 			justifiedEpoch := epoch - s.Config.JustifyEpochsAgo
 			if justifiedEpoch > s.Chain.Dag.Justified.Slot/constants.EPOCH_LENGTH {
+				log.Printf("justifiedEpoch 0x%x > 0x%x\n", justifiedEpoch, s.Chain.Dag.Justified.Slot/constants.EPOCH_LENGTH)
 				j := head
 				for j != nil && j.Slot/constants.EPOCH_LENGTH > justifiedEpoch {
+					log.Printf("j %s >  justifiedEpoch 0x%x\n", j.String(), justifiedEpoch)
 					j = j.Parent
 				}
 				if j != nil && j != s.Chain.Dag.Justified {
+					log.Printf("Justify j %s\n", j.String())
 					s.Chain.Dag.Justify(j.Key)
 				}
 			}
 		}
 
-		if n % logInterval == 0 {
+		if n%logInterval == 0 {
 			log.Printf("total %d blocks added, %d blocks in dag, head at slot: %d, processed %d attestations.\n",
-				n, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot - constants.GENESIS_SLOT, attestationCounter)
+				n, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot-constants.GENESIS_SLOT, attestationCounter)
 		}
 		for a := uint64(0); a < s.Config.AttestationsPerBlock; a++ {
 			s.SimNewAttestation()
-			if a % headUpdateInterval == headUpdateInterval - 1 {
+			if a%headUpdateInterval == headUpdateInterval-1 {
 				s.Chain.UpdateHead()
 			}
 		}
@@ -202,10 +209,10 @@ func (s *Simulation) RunSim() {
 		s.SimNewBlock()
 	}
 	log.Printf("total %d blocks added, %d blocks in dag, head at slot: %d, processed %d attestations.\n",
-		s.Config.Blocks, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot - constants.GENESIS_SLOT, attestationCounter)
+		s.Config.Blocks, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot-constants.GENESIS_SLOT, attestationCounter)
 }
 
 func (s *Simulation) SaveNetworkGraph() {
 	simName := s.Config.String()
-	viz.CreateVizGraph("out/" + simName, s.Chain)
+	viz.CreateVizGraph("out/"+simName, s.Chain)
 }

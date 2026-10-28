@@ -6,21 +6,21 @@ import (
 	"time"
 )
 
-
-func main()  {
+func main() {
 	config := &sim.SimConfig{
-		ValidatorCount: 40000,
-		LatencyFactor: 0.8,
-		SlotSkipChance: 0.3,
-		BaseAttestWeight: 100,
+		ValidatorCount:       40,
+		LatencyFactor:        0.8,
+		SlotSkipChance:       0.3,
+		BaseAttestWeight:     100,
 		MaxExtraAttestWeight: 10,
-		Blocks: 10000,
-		AttestationsPerBlock: 1000,
-		JustifyEpochsAgo: 7,
-		FinalizeEpochsAgo: 10,
-		ForkChoiceRule: "proto_array",
+		Blocks:               100,
+		AttestationsPerBlock: 10,
+		JustifyEpochsAgo:     2,
+		FinalizeEpochsAgo:    3,
+		ForkChoiceRule:       "proto_array",
 	}
 
+	log.SetFlags(log.Llongfile | log.Ldate | log.Ltime | log.Lmicroseconds)
 	s := sim.NewSimulation(config)
 	name := config.String()
 

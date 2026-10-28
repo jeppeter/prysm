@@ -1,9 +1,9 @@
 package dag
 
 import "lmd-ghost/eth2/common"
+import "fmt"
 
 type DagNode struct {
-
 	Parent *DagNode
 
 	Children []*DagNode
@@ -29,6 +29,15 @@ type DagNode struct {
 
 	// Unused in some implementations
 	IndexAsChild uint32
+}
 
-
+func (d *DagNode) String() string {
+	var rets string
+	rets = ""
+	rets += fmt.Sprintf("DagNode[Key %s Slot 0x%x Height 0x%x Weight 0x%x Proposer 0x%x", d.Key.String(), d.Slot, d.Height, d.Weight, d.Proposer)
+	if d.Parent != nil {
+		rets += fmt.Sprintf(" Parent.Key %s", d.Parent.Key.String())
+	}
+	rets += "]"
+	return rets
 }
