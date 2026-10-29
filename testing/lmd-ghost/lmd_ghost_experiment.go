@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"lmd-ghost/sim"
 	"log"
+	"os"
 	"time"
 )
 
@@ -18,6 +20,22 @@ func main() {
 		JustifyEpochsAgo:     2,
 		FinalizeEpochsAgo:    3,
 		ForkChoiceRule:       "proto_array",
+	}
+	var err error
+
+	if len(os.Args) > 1 {
+
+		var ofile *os.File = nil
+		_, err = os.Stat(os.Args[1])
+		if err != nil {
+			ofile, err = os.Create(os.Args[1])
+		} else {
+			ofile, err = os.OpenFile(os.Args[1], os.O_WRONLY, 0666)
+		}
+		if err != nil {
+			panic(fmt.Sprintf("open [%s] error %s", os.Args[1], err.Error()))
+		}
+		log.SetOutput(ofile)
 	}
 
 	log.SetFlags(log.Llongfile | log.Ldate | log.Ltime | log.Lmicroseconds)
