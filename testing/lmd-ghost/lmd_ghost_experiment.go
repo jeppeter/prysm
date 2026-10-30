@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"lmd-ghost/sim"
 	"log"
@@ -10,12 +11,12 @@ import (
 
 func main() {
 	config := &sim.SimConfig{
-		ValidatorCount:       40,
+		ValidatorCount:       3,
 		LatencyFactor:        0.8,
 		SlotSkipChance:       0.3,
 		BaseAttestWeight:     100,
 		MaxExtraAttestWeight: 10,
-		Blocks:               100,
+		Blocks:               500,
 		AttestationsPerBlock: 10,
 		JustifyEpochsAgo:     2,
 		FinalizeEpochsAgo:    3,
@@ -24,6 +25,10 @@ func main() {
 	var err error
 
 	if len(os.Args) > 1 {
+		if os.Args[1] == "-h" || os.Args[1] == "--help" {
+			fmt.Fprintf(os.Stderr, "%s [logfile] [jsonfile]\n", os.Args[0])
+			return
+		}
 
 		var ofile *os.File = nil
 		_, err = os.Stat(os.Args[1])
@@ -39,6 +44,19 @@ func main() {
 	}
 
 	log.SetFlags(log.Llongfile | log.Ldate | log.Ltime | log.Lmicroseconds)
+
+	if len(os.Args) > 2 {
+		var inb []byte
+		inb, err = os.ReadFile(os.Args[2])
+		if err != nil {
+			panic(fmt.Sprintf("read [%s] error %s", os.Args[2], err.Error()))
+		}
+		err = json.Unmarshal(inb, config)
+		if err != nil {
+			panic(fmt.Sprintf("parse [%s] error %s", os.Args[2], err.Error()))
+		}
+	}
+
 	s := sim.NewSimulation(config)
 	name := config.String()
 

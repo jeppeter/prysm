@@ -146,6 +146,9 @@ func (s *Simulation) SimNewAttestation() {
 func (s *Simulation) RunSim() {
 	// log every 5% of the simulated amount of blocks
 	logInterval := s.Config.Blocks / 20
+	if logInterval == 0 {
+		logInterval = 1
+	}
 	// update the head 10 times during attestation processing.
 	headUpdateInterval := s.Config.AttestationsPerBlock / 10
 	attestationCounter := uint64(0)
