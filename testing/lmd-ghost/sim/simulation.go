@@ -6,7 +6,7 @@ import (
 	"lmd-ghost/eth2/block"
 	"lmd-ghost/eth2/chain"
 	"lmd-ghost/eth2/common"
-	"lmd-ghost/eth2/common/constants"
+	_ "lmd-ghost/eth2/common/constants"
 	"lmd-ghost/eth2/dag"
 	"lmd-ghost/eth2/fork_choice/choices/cached"
 	"lmd-ghost/eth2/fork_choice/choices/proto_array"
@@ -46,7 +46,7 @@ func NewSimulation(c *SimConfig) *Simulation {
 		ParentHash: common.Hash256{0},
 		Hash:       common.Hash256{1},
 		Proposer:   0,
-		Slot:       constants.GENESIS_SLOT,
+		Slot:       c.GenesisSlot,
 	}
 
 	ch, err := chain.NewBeaconChain(genesisBlock, initForkChoice)
@@ -119,6 +119,7 @@ func (s *Simulation) SimNewBlock() {
 
 	// create the block
 	bl := &block.BeaconBlock{ParentHash: parentBlock.Key, Hash: blockHash, Proposer: proposer, Slot: blockSlot}
+	log.Printf("NewBlock %s\n", bl.String())
 
 	// add it to the chain
 	if err := s.Chain.BlockIn(bl); err != nil {
@@ -166,6 +167,9 @@ func (s *Simulation) RunSim() {
 	}
 	// update the head 10 times during attestation processing.
 	headUpdateInterval := s.Config.AttestationsPerBlock / 10
+	if headUpdateInterval == 0 {
+		headUpdateInterval = 1
+	}
 	attestationCounter := uint64(0)
 	if s.Config.FinalizeEpochsAgo < s.Config.JustifyEpochsAgo {
 		panic("invalid config: finalization happens quicker than justification in config")
@@ -179,29 +183,40 @@ func (s *Simulation) RunSim() {
 	for n := uint64(0); n < s.Config.Blocks; n++ {
 		head := s.Chain.Dag.Nodes[s.Chain.Head]
 		log.Printf("[%d] head %s\n", n, head.String())
-		epoch := head.Slot / constants.EPOCH_LENGTH
+		epoch := head.Slot / s.Config.EpochLength
 		if epoch > s.Config.FinalizeEpochsAgo {
-			log.Printf("epoch 0x%x < FinalizeEpochsAgo 0x%x\n", epoch, s.Config.FinalizeEpochsAgo)
+			log.Printf("epoch 0x%x > FinalizeEpochsAgo 0x%x\n", epoch, s.Config.FinalizeEpochsAgo)
 			finalizedEpoch := epoch - s.Config.FinalizeEpochsAgo
-			if finalizedEpoch > s.Chain.Dag.Finalized.Slot/constants.EPOCH_LENGTH {
+			log.Printf("finalizedEpoch %d s.Chain.Dag.Finalized.Slot(%d)/s.Config.EpochLength(%d) %d\n", finalizedEpoch, s.Chain.Dag.Finalized.Slot, s.Config.EpochLength, s.Chain.Dag.Finalized.Slot/s.Config.EpochLength)
+			if finalizedEpoch > s.Chain.Dag.Finalized.Slot/s.Config.EpochLength {
 				f := s.Chain.Dag.Justified
-				for f != nil && f.Slot/constants.EPOCH_LENGTH > finalizedEpoch {
-					log.Printf("f %s > finalizedEpoch 0x%x\n", f.String(), finalizedEpoch)
+				for f != nil && f.Slot/s.Config.EpochLength > finalizedEpoch {
+					var pkey string
+					pkey = ""
+					if f.Parent != nil {
+						pkey = f.Parent.Key.String()
+					}
+					log.Printf("f %s > finalizedEpoch 0x%x f [%s] => [%s]\n", f.String(), finalizedEpoch, f.Key.String(), pkey)
 					f = f.Parent
 				}
 				if f != nil && f != s.Chain.Dag.Finalized {
 					log.Printf("f %s Finalized", f.String())
 					s.Chain.Dag.Finalize(f.Key)
+					arrs := s.Chain.Dag.FinalizeChain()
+					for ii, cc := range arrs {
+						log.Printf("[%d][%s]\n", ii, cc.String())
+					}
 				}
 			}
 		}
 		if epoch > s.Config.JustifyEpochsAgo {
 			log.Printf("epoch 0x%x > JustifyEpochsAgo 0x%x\n", epoch, s.Config.JustifyEpochsAgo)
 			justifiedEpoch := epoch - s.Config.JustifyEpochsAgo
-			if justifiedEpoch > s.Chain.Dag.Justified.Slot/constants.EPOCH_LENGTH {
-				log.Printf("justifiedEpoch 0x%x > 0x%x\n", justifiedEpoch, s.Chain.Dag.Justified.Slot/constants.EPOCH_LENGTH)
+			log.Printf("justifiedEpoch %d s.Chain.Dag.Justified.Slot(%d)/s.Config.EpochLength(%d) %d \n", justifiedEpoch, s.Chain.Dag.Justified.Slot, s.Config.EpochLength, s.Chain.Dag.Justified.Slot/s.Config.EpochLength)
+			if justifiedEpoch > s.Chain.Dag.Justified.Slot/s.Config.EpochLength {
+				log.Printf("justifiedEpoch 0x%x > 0x%x\n", justifiedEpoch, s.Chain.Dag.Justified.Slot/s.Config.EpochLength)
 				j := head
-				for j != nil && j.Slot/constants.EPOCH_LENGTH > justifiedEpoch {
+				for j != nil && j.Slot/s.Config.EpochLength > justifiedEpoch {
 					log.Printf("j %s >  justifiedEpoch 0x%x\n", j.String(), justifiedEpoch)
 					j = j.Parent
 				}
@@ -214,7 +229,7 @@ func (s *Simulation) RunSim() {
 
 		if n%logInterval == 0 {
 			log.Printf("total %d blocks added, %d blocks in dag, head at slot: %d, processed %d attestations.\n",
-				n, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot-constants.GENESIS_SLOT, attestationCounter)
+				n, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot-s.Config.GenesisSlot, attestationCounter)
 		}
 		for a := uint64(0); a < s.Config.AttestationsPerBlock; a++ {
 			s.SimNewAttestation()
@@ -227,7 +242,7 @@ func (s *Simulation) RunSim() {
 		s.SimNewBlock()
 	}
 	log.Printf("total %d blocks added, %d blocks in dag, head at slot: %d, processed %d attestations.\n",
-		s.Config.Blocks, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot-constants.GENESIS_SLOT, attestationCounter)
+		s.Config.Blocks, len(s.Chain.Dag.Nodes), s.Chain.Dag.Nodes[s.Chain.Head].Slot-s.Config.GenesisSlot, attestationCounter)
 }
 
 func (s *Simulation) SaveNetworkGraph() {

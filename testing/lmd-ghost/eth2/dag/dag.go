@@ -78,6 +78,7 @@ func (dag *BeaconDag) AttestationIn(atIn *attestation.Attestation) {
 }
 
 func (dag *BeaconDag) Justify(blockHash common.Hash256) {
+	log.Printf("Justified %s\n", blockHash.String())
 	dag.Justified = dag.Nodes[blockHash]
 }
 
@@ -102,10 +103,12 @@ func (dag *BeaconDag) Finalize(blockHash common.Hash256) {
 func (dag *BeaconDag) SyncChanges() {
 	// Find all the changes made in the aggregator and apply them to the DAG.
 	changes := make([]ScoreChange, 0)
+	log.Printf("Start SyncChanges\n")
 	for k, v := range dag.agor.LatestAggregates {
 		if v.PrevWeight != v.Weight {
 			// get delta
 			delta := int64(v.Weight) - int64(v.PrevWeight)
+			log.Printf("delta v[%s] 0x%x - 0x%x = 0x%x\n", k.String(), v.Weight, v.PrevWeight, delta)
 			// resolve difference in weight
 			v.PrevWeight = v.Weight
 			// remember the change, append it to our "to do" list of changes
@@ -115,6 +118,7 @@ func (dag *BeaconDag) SyncChanges() {
 	}
 	dag.ForkChoice.ApplyScoreChanges(changes)
 	dag.synced = true
+	log.Printf("End SyncChanges\n")
 }
 
 func (dag *BeaconDag) HeadFn() common.Hash256 {
@@ -130,4 +134,30 @@ func (dag *BeaconDag) Cleanup() {
 	// cleanup aggregator
 	dag.agor.Cleanup()
 	// TODO prune DAG
+}
+
+func (dag *BeaconDag) FinalizeChain() (retarr []common.Hash256) {
+	retarr = []common.Hash256{}
+	if dag.Finalized != nil {
+		var curkey *DagNode
+		var childkey *DagNode
+		retarr = append(retarr, dag.Finalized.Key)
+		curkey = dag.Finalized
+		for {
+
+			log.Printf("[%s] Children %d\n", curkey.Key.String(), len(curkey.Children))
+			for ii, cc := range curkey.Children {
+				log.Printf("[%s] children[%d] [%s]\n", curkey.Key.String(), ii, cc.Key.String())
+			}
+
+			if len(curkey.Children) == 0 {
+				break
+			}
+			childkey = curkey.Children[0]
+
+			retarr = append(retarr, childkey.Key)
+			curkey = childkey
+		}
+	}
+	return
 }

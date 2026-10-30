@@ -1,11 +1,11 @@
 package block
 
 import (
+	"fmt"
 	"lmd-ghost/eth2/common"
 )
 
 type BeaconBlock struct {
-
 	ParentHash common.Hash256
 
 	Hash common.Hash256
@@ -18,4 +18,8 @@ type BeaconBlock struct {
 
 }
 
-
+func (b *BeaconBlock) String() (rets string) {
+	rets = ""
+	rets += fmt.Sprintf("BeaconBlock[ParentHash %s Hash %s Proposer 0x%x Slot 0x%x]", b.ParentHash.String(), b.Hash.String(), b.Proposer, b.Slot)
+	return
+}

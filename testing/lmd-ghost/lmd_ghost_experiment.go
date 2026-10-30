@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"lmd-ghost/eth2/common/constants"
 	"lmd-ghost/sim"
 	"log"
 	"os"
@@ -25,6 +26,8 @@ func main() {
 		FinalizeEpochsAgo:    3,
 		ForkChoiceRule:       "proto_array",
 		RandFile:             "",
+		GenesisSlot:          constants.GENESIS_SLOT,
+		EpochLength:          constants.EPOCH_LENGTH,
 	}
 	var err error
 
