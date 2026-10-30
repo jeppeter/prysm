@@ -24,6 +24,7 @@ func main() {
 		JustifyEpochsAgo:     2,
 		FinalizeEpochsAgo:    3,
 		ForkChoiceRule:       "proto_array",
+		RandFile:             "",
 	}
 	var err error
 

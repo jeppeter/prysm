@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"fmt"
 	"lmd-ghost/eth2/attestations/attestation"
 	"lmd-ghost/eth2/block"
 	"lmd-ghost/eth2/chain"
@@ -13,6 +14,7 @@ import (
 	"lmd-ghost/eth2/fork_choice/choices/spec"
 	"lmd-ghost/eth2/fork_choice/choices/stateful"
 	"lmd-ghost/eth2/fork_choice/choices/vitalik"
+	"lmd-ghost/randfile"
 	"lmd-ghost/viz"
 	"log"
 	"math/rand"
@@ -37,6 +39,7 @@ type Simulation struct {
 
 func NewSimulation(c *SimConfig) *Simulation {
 
+	var s *Simulation = nil
 	initForkChoice := forkRules[c.ForkChoiceRule]
 
 	genesisBlock := &block.BeaconBlock{
@@ -51,10 +54,22 @@ func NewSimulation(c *SimConfig) *Simulation {
 		panic("Failed to initialize chain for simulation.")
 	}
 
-	s := &Simulation{
-		RNG:    rand.New(rand.NewSource(1234)),
-		Chain:  ch,
-		Config: c,
+	if len(c.RandFile) == 0 {
+		s = &Simulation{
+			RNG:    rand.New(rand.NewSource(1234)),
+			Chain:  ch,
+			Config: c,
+		}
+	} else {
+		rfile, err := randfile.NewRandFile(c.RandFile)
+		if err != nil {
+			panic(fmt.Sprintf("[%s] as randfile error %s", c.RandFile, err.Error()))
+		}
+		s = &Simulation{
+			RNG:    rand.New(rfile),
+			Chain:  ch,
+			Config: c,
+		}
 	}
 	return s
 }

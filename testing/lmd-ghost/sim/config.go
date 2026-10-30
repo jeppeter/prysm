@@ -27,6 +27,8 @@ type SimConfig struct {
 	AttestationsPerBlock uint64 `json:"attestationsperblock"`
 	// The name of the fork-choice rule. Generally, names are the same as the packages. Mapping is defined in sim/simulation.go.
 	ForkChoiceRule string `json:"forkchoicerule"`
+	// randfile
+	RandFile string `json:"randfile"`
 }
 
 func (c *SimConfig) String() string {
