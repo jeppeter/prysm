@@ -7,26 +7,26 @@ import (
 	"lmd-ghost/eth2/common"
 	"lmd-ghost/eth2/dag"
 	"lmd-ghost/eth2/storage"
+	"log"
 )
 
 type BeaconChain struct {
 
 	// Access other most-current variables through storage or dag, using head as reference.
-	Head      common.Hash256
+	Head common.Hash256
 
 	// The inner-source of continuously-changing truth: the data stored within and between (i.e. state) the blocks.
-	Storage    *storage.BeaconStorage
+	Storage *storage.BeaconStorage
 
 	// The outer-source of continuously-changing truth: the collection of blocks, structured.
-	Dag        *dag.BeaconDag
-
+	Dag *dag.BeaconDag
 }
 
 func NewBeaconChain(genesisBlock *block.BeaconBlock, initForkChoice dag.InitForkChoice) (*BeaconChain, error) {
 	res := &BeaconChain{
-		Head: genesisBlock.Hash,
+		Head:    genesisBlock.Hash,
 		Storage: storage.NewBeaconStorage(),
-		Dag: dag.NewBeaconDag(initForkChoice),
+		Dag:     dag.NewBeaconDag(initForkChoice),
 	}
 	if err := res.Storage.PutBlock(genesisBlock); err != nil {
 		return nil, err
@@ -98,4 +98,5 @@ func (ch *BeaconChain) AttestationIn(attestation *attestation.Attestation) error
 func (ch *BeaconChain) UpdateHead() {
 	// determine the head
 	ch.Head = ch.Dag.HeadFn()
+	log.Printf("UpdateHead %s\n", ch.Head.String())
 }

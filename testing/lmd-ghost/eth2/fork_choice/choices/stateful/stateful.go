@@ -50,17 +50,15 @@ func onRemoveWeight(n *dag.DagNode) {
 	}
 }
 
-/// A simple take on using a DAG for the fork-choice.
-/// Stores entries in DAG, and propagates target votes at the insertion time.
+// / A simple take on using a DAG for the fork-choice.
+// / Stores entries in DAG, and propagates target votes at the insertion time.
 type StatefulLMDGhost struct {
-
 	dag *dag.BeaconDag
-
 }
 
 func NewStatefulLMDGhost(d *dag.BeaconDag) dag.ForkChoice {
 	res := &StatefulLMDGhost{
-		dag:          d,
+		dag: d,
 	}
 	return res
 }
@@ -119,4 +117,9 @@ func (gh *StatefulLMDGhost) HeadFn() *dag.DagNode {
 	// Changing the root is costless
 	// (If you prune away old nodes it still costs something, but this also needs to be done for other algos)
 	return gh.dag.Justified.BestTarget
+}
+
+func (gh *StatefulLMDGhost) PrintMap() (outs string) {
+	outs = ""
+	return
 }

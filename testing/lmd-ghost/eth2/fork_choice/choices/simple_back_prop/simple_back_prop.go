@@ -4,10 +4,9 @@ import (
 	"lmd-ghost/eth2/dag"
 )
 
-/// A simple take on using a DAG for the fork-choice.
-/// Stores entries in DAG, but back-propagates target votes every time the head is computed.
+// / A simple take on using a DAG for the fork-choice.
+// / Stores entries in DAG, but back-propagates target votes every time the head is computed.
 type SimpleBackPropLMDGhost struct {
-
 	dag *dag.BeaconDag
 
 	maxKnownSlot uint64
@@ -63,7 +62,7 @@ type ChildScore struct {
 func (gh *SimpleBackPropLMDGhost) HeadFn() *dag.DagNode {
 	start := gh.dag.Justified
 	// Keep track of weight for each block, per height
-	weightedBlocksAtHeight := make([]map[*dag.DagNode]int64, gh.maxKnownSlot + 1 - start.Slot)
+	weightedBlocksAtHeight := make([]map[*dag.DagNode]int64, gh.maxKnownSlot+1-start.Slot)
 	for i := 0; i < len(weightedBlocksAtHeight); i++ {
 		weightedBlocksAtHeight[i] = make(map[*dag.DagNode]int64)
 	}
@@ -93,7 +92,7 @@ func (gh *SimpleBackPropLMDGhost) HeadFn() *dag.DagNode {
 				}
 			}
 			// Propagate weight of child to parent
-			weightedBlocksAtHeight[block.Parent.Slot - start.Slot][block.Parent] = weightedBlocksAtHeight[block.Parent.Slot - start.Slot][block.Parent] + w
+			weightedBlocksAtHeight[block.Parent.Slot-start.Slot][block.Parent] = weightedBlocksAtHeight[block.Parent.Slot-start.Slot][block.Parent] + w
 			// keep track of the best child for this parent block
 			mapping, initialized := bestChildMapping[block.Parent]
 			if !initialized || w > mapping.ChildScore {
@@ -112,4 +111,9 @@ func (gh *SimpleBackPropLMDGhost) HeadFn() *dag.DagNode {
 	} else {
 		return gh.dag.Justified
 	}
+}
+
+func (gh *SimpleBackPropLMDGhost) PrintMap() (outs string) {
+	outs = ""
+	return
 }

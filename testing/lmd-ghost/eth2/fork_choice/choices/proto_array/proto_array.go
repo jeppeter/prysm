@@ -1,6 +1,7 @@
 package proto_array
 
 import (
+	"fmt"
 	"lmd-ghost/eth2/dag"
 	"log"
 )
@@ -23,13 +24,77 @@ type ProtoArrayLMDGhost struct {
 	nodes []*dag.DagNode
 
 	// root -> node index
-	indices map[*dag.DagNode]uint64
+	indices  map[*dag.DagNode]uint64
+	pruneidx uint64
+	orphans  map[uint64]uint64
+}
+
+func format_tab(tab int) (rets string) {
+	rets = ""
+	for i := 0; i < tab; i += 1 {
+		rets += "    "
+	}
+	return
+}
+
+func (pa *ProtoArrayLMDGhost) PrintIdx(idx uint64) (outs string) {
+	if idx == nonExistentNode {
+		outs = "nonExistentNode"
+	} else {
+		outs = fmt.Sprintf("%d", idx+pa.pruneidx)
+	}
+	return
+}
+
+func (pa *ProtoArrayLMDGhost) PrintChild(chldmap map[uint64][]uint64, cur uint64, tab int) (outs string) {
+	outs = ""
+	pa.orphans[cur] = 1
+	if len(pa.nodes) <= int(cur) {
+		return
+	}
+	outs += format_tab(tab)
+	outs += fmt.Sprintf("[%s]%s bestchild %s weight %d besttarget %s\n", pa.PrintIdx(cur), pa.nodes[cur].String(), pa.PrintIdx(pa.b[cur]), pa.w[cur], pa.PrintIdx(pa.t[cur]))
+	chldren, ok := chldmap[cur]
+	if !ok {
+		return
+	}
+	for _, curch := range chldren {
+		outs += pa.PrintChild(chldmap, curch, tab+1)
+	}
+	return
+}
+
+func (pa *ProtoArrayLMDGhost) PrintMap() (rets string) {
+	rets = ""
+	chs := make(map[uint64][]uint64)
+	pa.orphans = make(map[uint64]uint64)
+	for ii, i := range pa.p {
+		if i != nonExistentNode {
+			_, ok := chs[i]
+			if !ok {
+				chs[i] = []uint64{}
+			}
+			chs[i] = append(chs[i], uint64(ii))
+		}
+	}
+	/*now we should give the */
+	rets += pa.PrintChild(chs, 0, 0)
+
+	for ci := 0; ci < len(pa.nodes); ci += 1 {
+		_, ok := pa.orphans[uint64(ci)]
+		if !ok {
+			rets += fmt.Sprintf("orphan[%s]%s bestchild %s weight %d besttarget %s\n", pa.PrintIdx(uint64(ci)), pa.nodes[uint64(ci)].String(), pa.PrintIdx(pa.b[uint64(ci)]), pa.w[uint64(ci)], pa.PrintIdx(pa.t[uint64(ci)]))
+		}
+	}
+
+	return
 }
 
 func NewProtoArrayLMDGhost(d *dag.BeaconDag) dag.ForkChoice {
 	res := &ProtoArrayLMDGhost{
-		dag:     d,
-		indices: make(map[*dag.DagNode]uint64),
+		dag:      d,
+		indices:  make(map[*dag.DagNode]uint64),
+		pruneidx: 0,
 	}
 	return res
 }
@@ -115,6 +180,7 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 		}
 	}
 	log.Printf("End ApplyScoreChanges\n")
+	log.Printf("ApplyScoreChanges\n%s\n", gh.PrintMap())
 }
 
 func (gh *ProtoArrayLMDGhost) OnNewNode(block *dag.DagNode) {
@@ -183,18 +249,27 @@ func (gh *ProtoArrayLMDGhost) OnPrune() {
 		}
 		gh.indices[n] -= start
 	}
+	/*to make prune as ok*/
+	gh.pruneidx += start
+	log.Printf("OnPrune %d\n", gh.pruneidx)
 }
 
 func (gh *ProtoArrayLMDGhost) HeadFn() *dag.DagNode {
 	// look up the index of the finalized node, this is our starting point
 	i := gh.indices[gh.dag.Finalized]
+	oi := i
 	for {
 		if bi := gh.b[i]; bi != nonExistentNode {
+			log.Printf("new HeadFn %s\n", gh.nodes[bi].String())
 			i = bi
 		} else {
 			break
 		}
 	}
+	if oi != i {
+		log.Printf("new HeadFn final %s\n", gh.nodes[i].String())
+	}
 	// Get the target (again, adjust index)
+	log.Printf("HeadFn\n%s\n", gh.PrintMap())
 	return gh.nodes[i]
 }

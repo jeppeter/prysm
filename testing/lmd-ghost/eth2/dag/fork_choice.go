@@ -20,6 +20,7 @@ type ForkChoice interface {
 	ApplyScoreChanges(changes []ScoreChange)
 	OnPrune()
 	HeadFn() *DagNode
+	PrintMap() (outs string)
 }
 
 type InitForkChoice func(dag *BeaconDag) ForkChoice

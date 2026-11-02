@@ -4,9 +4,8 @@ import (
 	"lmd-ghost/eth2/dag"
 )
 
-/// The naive, but readable, spec implementation
+// / The naive, but readable, spec implementation
 type SpecLMDGhost struct {
-
 	dag *dag.BeaconDag
 
 	latestScores map[*dag.DagNode]int64
@@ -48,8 +47,9 @@ func (gh *SpecLMDGhost) OnPrune() {
 	}
 }
 
-/// Retrieves the head by *recursively* looking for the highest voted block
-//   at *every* block in the path from start to head.
+// / Retrieves the head by *recursively* looking for the highest voted block
+//
+//	at *every* block in the path from start to head.
 func (gh *SpecLMDGhost) HeadFn() *dag.DagNode {
 	// Minor difference:
 	// Normally you would have to filter for the active validators, and get their targets.
@@ -85,7 +85,7 @@ func (gh *SpecLMDGhost) getVoteCount(block *dag.DagNode) int64 {
 	return totalWeight
 }
 
-/// Gets the ancestor of `node` at `slot`
+// / Gets the ancestor of `node` at `slot`
 func (gh *SpecLMDGhost) getAncestor(block *dag.DagNode, slot uint64) *dag.DagNode {
 	if block.Slot == slot {
 		return block
@@ -94,4 +94,9 @@ func (gh *SpecLMDGhost) getAncestor(block *dag.DagNode, slot uint64) *dag.DagNod
 	} else {
 		return gh.getAncestor(block.Parent, slot)
 	}
+}
+
+func (gh *SpecLMDGhost) PrintMap() (outs string) {
+	outs = ""
+	return
 }

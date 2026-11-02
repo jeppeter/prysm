@@ -9,23 +9,24 @@ import (
 Note that Vitalik's algorithm is a port (with some updates) from the original (written in Python) in the Ethereum research repo, which is also licensed to MIT, but to Vitalik.
 Original of Vitalik can be found here: https://github.com/ethereum/research/blob/master/ghost/ghost.py
 
- */
+*/
 
 type CacheKey [32 + 4]uint8
 
 // Trick to get a quick conversion array, gets the log of a number
 const logzLen = 100000
+
 var logz = [logzLen]uint8{0, 0}
+
 func init() {
 	for i := 2; i < logzLen; i++ {
-		logz[i] = logz[i / 2] + 1
+		logz[i] = logz[i/2] + 1
 	}
 }
 
-/// Vitaliks optimized version of the spec implementation
-/// Orignal python version here: https://github.com/ethereum/research/blob/master/ghost/ghost.py
+// / Vitaliks optimized version of the spec implementation
+// / Orignal python version here: https://github.com/ethereum/research/blob/master/ghost/ghost.py
 type VitaliksOptimizedLMDGhost struct {
-
 	dag *dag.BeaconDag
 
 	latestScores map[*dag.DagNode]int64
@@ -40,10 +41,10 @@ type VitaliksOptimizedLMDGhost struct {
 
 func NewVitaliksOptimizedLMDGhost(d *dag.BeaconDag) dag.ForkChoice {
 	res := &VitaliksOptimizedLMDGhost{
-		dag: d,
-		latestScores: make(map[*dag.DagNode]int64),
-		cache: make(map[CacheKey]*dag.DagNode),
-		ancestors: [16]map[*dag.DagNode]*dag.DagNode{},
+		dag:            d,
+		latestScores:   make(map[*dag.DagNode]int64),
+		cache:          make(map[CacheKey]*dag.DagNode),
+		ancestors:      [16]map[*dag.DagNode]*dag.DagNode{},
 		maxKnownHeight: 0,
 	}
 	for i := uint8(0); i < 16; i++ {
@@ -71,7 +72,7 @@ func (gh *VitaliksOptimizedLMDGhost) OnNewNode(block *dag.DagNode) {
 	startHeight := gh.dag.Finalized.Height
 	// update the ancestor data (used for logarithmic lookup)
 	for i := uint8(0); i < 16; i++ {
-		if (block.Height - startHeight) % (1 << i) == 0 {
+		if (block.Height-startHeight)%(1<<i) == 0 {
 			gh.ancestors[i][block] = block.Parent
 		} else {
 			gh.ancestors[i][block] = gh.ancestors[i][block.Parent]
@@ -84,8 +85,8 @@ func (gh *VitaliksOptimizedLMDGhost) OnNewNode(block *dag.DagNode) {
 	}
 }
 
-/// Similar to the spec get_ancestor,
-/// but using height instead of slot numbers to enable skipping ahead logarithmically, and with caching.
+// / Similar to the spec get_ancestor,
+// / but using height instead of slot numbers to enable skipping ahead logarithmically, and with caching.
 func (gh *VitaliksOptimizedLMDGhost) getAncestor(block *dag.DagNode, height uint64) *dag.DagNode {
 
 	if height >= block.Height {
@@ -110,13 +111,13 @@ func (gh *VitaliksOptimizedLMDGhost) getAncestor(block *dag.DagNode, height uint
 		return res
 	}
 
-	if x := gh.ancestors[logz[block.Height - height - 1]][block]; x == nil {
+	if x := gh.ancestors[logz[block.Height-height-1]][block]; x == nil {
 		panic("Ancestors data is invalid")
 	}
 
 	// this will be the output
 	// skip ahead logarithmically to find the ancestor, and dive in recursively
-	skipBlock := gh.ancestors[logz[block.Height - height - 1]][block]
+	skipBlock := gh.ancestors[logz[block.Height-height-1]][block]
 	o := gh.getAncestor(skipBlock, height)
 	if o == nil {
 		return nil
@@ -131,7 +132,6 @@ func (gh *VitaliksOptimizedLMDGhost) getAncestor(block *dag.DagNode, height uint
 
 	return o
 }
-
 
 func (gh *VitaliksOptimizedLMDGhost) getPowerOf2Below(x uint64) uint64 {
 	// simply logz it, and 2^e this, to get the closes power of 2
@@ -151,7 +151,7 @@ func (gh *VitaliksOptimizedLMDGhost) getClearWinner(latestVotes map[*dag.DagNode
 		}
 	}
 	for k, v := range atHeight {
-		if v >= totalVoteCount / 2 {
+		if v >= totalVoteCount/2 {
 			return k
 		}
 	}
@@ -211,9 +211,9 @@ func (gh *VitaliksOptimizedLMDGhost) HeadFn() *dag.DagNode {
 		// Trick: check every depth for a clear 50% winner. This enables us to skip ahead towards the leafs of the tree.
 		// And do so from leaf-level, back towards 0, to get the most out of this trick.
 		// But not the very end, as this will likely not have a majority vote.
-		step := gh.getPowerOf2Below(gh.maxKnownHeight - head.Height) / 2
+		step := gh.getPowerOf2Below(gh.maxKnownHeight-head.Height) / 2
 		for step > 0 {
-			possibleClearWinner := gh.getClearWinner(latestVotes, head.Height - (head.Height % step) + step)
+			possibleClearWinner := gh.getClearWinner(latestVotes, head.Height-(head.Height%step)+step)
 			if possibleClearWinner != nil {
 				head = possibleClearWinner
 				break
@@ -233,7 +233,7 @@ func (gh *VitaliksOptimizedLMDGhost) HeadFn() *dag.DagNode {
 			//  but we add up votes for every child with just 1 iteration through all latest-votes.
 			childScores := make(map[*dag.DagNode]int64)
 			for t, w := range latestVotes {
-				if child := gh.getAncestor(t, head.Height + 1); child != nil {
+				if child := gh.getAncestor(t, head.Height+1); child != nil {
 					childScores[child] += w
 				}
 			}
@@ -265,4 +265,9 @@ func (gh *VitaliksOptimizedLMDGhost) HeadFn() *dag.DagNode {
 			delete(latestVotes, k)
 		}
 	}
+}
+
+func (gh *VitaliksOptimizedLMDGhost) PrintMap() (outs string) {
+	outs = ""
+	return
 }

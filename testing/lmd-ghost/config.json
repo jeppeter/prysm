@@ -1,0 +1,7 @@
+{
+	"blocks" : 50,
+	"validatorcount" : 3,
+	"attestationsperblock" : 3,
+	"genesisslot" : 100,
+	"epochlength" : 3
+}

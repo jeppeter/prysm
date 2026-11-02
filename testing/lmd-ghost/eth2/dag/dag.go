@@ -64,6 +64,7 @@ func (dag *BeaconDag) BlockIn(block *block.BeaconBlock) {
 	dag.Nodes[block.Hash] = node
 	if dag.Finalized == nil {
 		dag.Finalized = node
+		log.Printf("set Finalized %s\n", dag.Finalized.String())
 	}
 	if dag.Justified == nil {
 		dag.Justified = node
@@ -80,11 +81,13 @@ func (dag *BeaconDag) AttestationIn(atIn *attestation.Attestation) {
 func (dag *BeaconDag) Justify(blockHash common.Hash256) {
 	log.Printf("Justified %s\n", blockHash.String())
 	dag.Justified = dag.Nodes[blockHash]
+	log.Printf("fork\n%s\n", dag.ForkChoice.PrintMap())
 }
 
 func (dag *BeaconDag) Finalize(blockHash common.Hash256) {
 	dag.synced = false
 	dag.Finalized = dag.Nodes[blockHash]
+	log.Printf("set Finalized %s\n", dag.Finalized.String())
 	// Prune away everything older than the finalized block
 	for k, v := range dag.Nodes {
 		if v.Slot < dag.Finalized.Slot {
