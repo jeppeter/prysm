@@ -147,3 +147,18 @@ func (agor *AttestationsAggregator) Cleanup() {
 		}
 	}
 }
+
+func format_tab(tab int) (rets string) {
+	rets = ""
+	for i := 0; i < tab; i += 1 {
+		rets += "    "
+	}
+	return
+}
+
+func (agor *AttestationsAggregator) PrintMap() (outs string) {
+	for att, atIn := range agor.LatestTargets {
+		outs += fmt.Sprintf("[%d] %s\n", att, atIn.String())
+	}
+	return
+}

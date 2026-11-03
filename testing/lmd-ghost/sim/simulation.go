@@ -217,7 +217,7 @@ func (s *Simulation) RunSim() {
 				log.Printf("justifiedEpoch 0x%x > 0x%x\n", justifiedEpoch, s.Chain.Dag.Justified.Slot/s.Config.EpochLength)
 				j := head
 				for j != nil && j.Slot/s.Config.EpochLength > justifiedEpoch {
-					log.Printf("j %s >  justifiedEpoch 0x%x\n", j.String(), justifiedEpoch)
+					log.Printf("j %s (j.Slot (%d) / s.Config.EpochLength(%d)) >  justifiedEpoch 0x%x\n", j.String(), j.Slot, s.Config.EpochLength, justifiedEpoch)
 					j = j.Parent
 				}
 				if j != nil && j != s.Chain.Dag.Justified {

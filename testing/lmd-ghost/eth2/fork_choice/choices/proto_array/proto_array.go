@@ -46,20 +46,23 @@ func (pa *ProtoArrayLMDGhost) PrintIdx(idx uint64) (outs string) {
 	return
 }
 
-func (pa *ProtoArrayLMDGhost) PrintChild(chldmap map[uint64][]uint64, cur uint64, tab int) (outs string) {
+func (pa *ProtoArrayLMDGhost) PrintChild(chldmap map[uint64][]uint64, cur uint64, tab int, phead *dag.DagNode) (outs string) {
 	outs = ""
 	pa.orphans[cur] = 1
 	if len(pa.nodes) <= int(cur) {
 		return
 	}
 	outs += format_tab(tab)
+	if phead == pa.nodes[cur] {
+		outs += "*"
+	}
 	outs += fmt.Sprintf("[%s]%s bestchild %s weight %d besttarget %s\n", pa.PrintIdx(cur), pa.nodes[cur].String(), pa.PrintIdx(pa.b[cur]), pa.w[cur], pa.PrintIdx(pa.t[cur]))
 	chldren, ok := chldmap[cur]
 	if !ok {
 		return
 	}
 	for _, curch := range chldren {
-		outs += pa.PrintChild(chldmap, curch, tab+1)
+		outs += pa.PrintChild(chldmap, curch, tab+1, phead)
 	}
 	return
 }
@@ -77,12 +80,16 @@ func (pa *ProtoArrayLMDGhost) PrintMap() (rets string) {
 			chs[i] = append(chs[i], uint64(ii))
 		}
 	}
+	phead := pa.innerhead()
 	/*now we should give the */
-	rets += pa.PrintChild(chs, 0, 0)
+	rets += pa.PrintChild(chs, 0, 0, phead)
 
 	for ci := 0; ci < len(pa.nodes); ci += 1 {
 		_, ok := pa.orphans[uint64(ci)]
 		if !ok {
+			if phead == pa.nodes[uint64(ci)] {
+				rets += "*"
+			}
 			rets += fmt.Sprintf("orphan[%s]%s bestchild %s weight %d besttarget %s\n", pa.PrintIdx(uint64(ci)), pa.nodes[uint64(ci)].String(), pa.PrintIdx(pa.b[uint64(ci)]), pa.w[uint64(ci)], pa.PrintIdx(pa.t[uint64(ci)]))
 		}
 	}
@@ -254,20 +261,28 @@ func (gh *ProtoArrayLMDGhost) OnPrune() {
 	log.Printf("OnPrune %d\n", gh.pruneidx)
 }
 
-func (gh *ProtoArrayLMDGhost) HeadFn() *dag.DagNode {
+func (gh *ProtoArrayLMDGhost) innerhead() *dag.DagNode {
 	// look up the index of the finalized node, this is our starting point
 	i := gh.indices[gh.dag.Finalized]
-	oi := i
 	for {
 		if bi := gh.b[i]; bi != nonExistentNode {
-			log.Printf("new HeadFn %s\n", gh.nodes[bi].String())
 			i = bi
 		} else {
 			break
 		}
 	}
-	if oi != i {
-		log.Printf("new HeadFn final %s\n", gh.nodes[i].String())
+	return gh.nodes[i]
+}
+
+func (gh *ProtoArrayLMDGhost) HeadFn() *dag.DagNode {
+	// look up the index of the finalized node, this is our starting point
+	i := gh.indices[gh.dag.Finalized]
+	for {
+		if bi := gh.b[i]; bi != nonExistentNode {
+			i = bi
+		} else {
+			break
+		}
 	}
 	// Get the target (again, adjust index)
 	log.Printf("HeadFn\n%s\n", gh.PrintMap())

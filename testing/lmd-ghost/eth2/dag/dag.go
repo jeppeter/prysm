@@ -130,6 +130,7 @@ func (dag *BeaconDag) HeadFn() common.Hash256 {
 		dag.SyncChanges()
 	}
 	// return the head
+	log.Printf("agor\n%s\n", dag.agor.PrintMap())
 	return dag.ForkChoice.HeadFn().Key
 }
 
