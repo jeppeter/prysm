@@ -287,6 +287,52 @@ class ProtoArrayLMDGhost(object):
             logging.error('%s'%(traceback.format_exc()))
         return
 
+PROTO_NOTE_EXPR_STR = '^.*ProtoArrayLMDGhost\\.note\\s+(.*)$'
+PROTO_BESTCHILDS_EXPR_STR = '^.*ProtoArrayLMDGhost\\.bestchild\\s+(\\[[0-9\\-,]+\\])$'
+PROTO_WEIGHT_EXPR_STR = '^.*ProtoArrayLMDGhost\\.weight\\s+(\\[[0-9,]+\\])$'
+PROTO_PARENT_EXPR_STR = '^.*ProtoArrayLMDGhost\\.parent\\s+(\\[[0-9\\-,]+\\])$'
+PROTO_TARGET_EXPR_STR = '^.*ProtoArrayLMDGhost\\.target\\s+(\\[[0-9,]+\\])$'
+PROTO_INDICES_EXPR_STR = '^.*ProtoArrayLMDGhost\\.indices\\s+(.*)$'
+PROTO_NODE_EXPR_STR = '^.*ProtoArrayLMDGhost\\.node\\s+(.*)$'
+
+class ParseProtoArray(object):
+    def __init__(self):
+        self.protoarray = None
+        return
+
+
+    def parse(self,lindex,sarr):
+        passed = lindex
+        self.protoarray = None
+        bestchildexpr = re.compile(PROTO_BESTCHILDS_EXPR_STR)
+        weightexpr = re.compile(PROTO_WEIGHT_EXPR_STR)
+        parentexpr = re.compile(PROTO_PARENT_EXPR_STR)
+        targetexpr = re.compile(PROTO_TARGET_EXPR_STR)
+        indicesexpr = re.compile(PROTO_INDICES_EXPR_STR)
+        nodeexpr = re.compile(PROTO_NODE_EXPR_STR)
+        while passed < len(sarr):
+            l = sarr[passed]
+            l = l.rstrip('\r\n')
+            m = bestchildexpr.findall(l)
+            if m is not None and len(m) > 0:
+                if self.protoarray is None:
+                    self.protoarray = ProtoArrayLMDGhost()
+                    self.protoarray.set_lindex(lindex)
+                self.protoarray.set_bestchilds(m[0])
+                passed += 1
+                continue
+            m = weightexpr.findall(l)
+            if m is not None and len(m) > 0:
+                if self.protoarray is None:
+                    self.protoarray = ProtoArrayLMDGhost()
+                    self.protoarray.set_lindex(lindex)
+                self.protoarray.set_weights(m[0])
+                passed += 1
+                continue
+
+
+            
+        return passed
 
 class LmdPair(object):
     def __init__(self):
@@ -427,13 +473,18 @@ class LmdPair(object):
         retval = self.check_attest(headdag.idx)
         return
 
+DAG_EXPR_STR = '^(\\s*)(\\*)?\\[([0-9]+)\\]DagNode\\[Key\\s+([0-9a-fA-F]+)\\s+Slot\\s+([0-9a-fA-FxX]+)\\s+Height\\s+([0-9a-fA-FxX]+)\\s+Weight\\s+([0-9a-fA-FxX]+)\\s+Proposer\\s+([0-9a-fA-FxX]+)(\\s+Parent\\.Key\\s+([0-9a-f]+))?\\]\\s+bestchild\\s+([^ ]+)\\s+weight\\s+([0-9]+)\\s+besttarget\\s([0-9]+)$'
+ATT_EXPR_STR = '^\\[([0-9]+)\\]\\s+Attestation\\[BeaconBlockRoot\\s+([a-f0-9A-F]+)\\s+ValidatorID\\s+([0-9a-fx]+)\\s+Weight\\s+([0-9a-fx]+)\\]$'
+
+
 class ParseAttMap(object):
     def __init__(self):
         self.attmap = None
         return
 
-    def parse(self,lindex,attexpr,lines):
+    def parse(self,lindex,lines):
         passed = lindex
+        attexpr = re.compile(ATT_EXPR_STR)
         while passed < len(lines):
             l = lines[passed]
             l = l.rstrip('\r\n')
@@ -469,9 +520,10 @@ class ParseDagNodeTree(object):
             idx += 1
         return idx
 
-    def parse(self,lindex,dagexpr,lines):
+    def parse(self,lindex,lines):
         passed = lindex
         dagpushs = []
+        dagexpr = re.compile(DAG_EXPR_STR)
         self.dagtree = None
         while passed < len(lines):
             l = lines[passed]
@@ -524,8 +576,6 @@ class ParseDagNodeTree(object):
         return passed
 
 
-DAG_EXPR_STR = '^(\\s*)(\\*)?\\[([0-9]+)\\]DagNode\\[Key\\s+([0-9a-fA-F]+)\\s+Slot\\s+([0-9a-fA-FxX]+)\\s+Height\\s+([0-9a-fA-FxX]+)\\s+Weight\\s+([0-9a-fA-FxX]+)\\s+Proposer\\s+([0-9a-fA-FxX]+)(\\s+Parent\\.Key\\s+([0-9a-f]+))?\\]\\s+bestchild\\s+([^ ]+)\\s+weight\\s+([0-9]+)\\s+besttarget\\s([0-9]+)$'
-ATT_EXPR_STR = '^\\[([0-9]+)\\]\\s+Attestation\\[BeaconBlockRoot\\s+([a-f0-9A-F]+)\\s+ValidatorID\\s+([0-9a-fx]+)\\s+Weight\\s+([0-9a-fx]+)\\]$'
 NEXT_ATT_EXPR_STR = '.*\\s+agor$'
 NEXT_DAG_EXPR_STR = '.*\\s+HeadFn$'
 
@@ -557,8 +607,6 @@ class LmdFilter(object):
         nextdagexpr = re.compile(NEXT_DAG_EXPR_STR)
         isatt = False
         isdag = False
-        dagexpr = re.compile(DAG_EXPR_STR)
-        attexpr = re.compile(ATT_EXPR_STR)
         curdagtree = None
         curatttree = None
         curpair = None
@@ -593,13 +641,13 @@ class LmdFilter(object):
             if not isatt and not isdag:
                 if nextattexpr.match(l):
                     curatttree = ParseAttMap()
-                    lindex = curatttree.parse(lindex+1,attexpr,sarr)
+                    lindex = curatttree.parse(lindex+1,sarr)
                     isatt = False
                     continue
                 if nextdagexpr.match(l):
                     isdag = True
                     curdagtree = ParseDagNodeTree()
-                    lindex = curdagtree.parse(lindex+1,dagexpr,sarr)
+                    lindex = curdagtree.parse(lindex+1,sarr)
                     if curatttree is not None and curatttree.attmap is not None and curdagtree.dagtree is not None:
                         lmdpair = LmdPair()
                         lmdpair.set_pair(curdagtree.dagtree,curatttree.attmap)
@@ -625,7 +673,7 @@ class ProcessChange(object):
         self.procs = []
         return
 
-    def parse(self):        
+    def parse(self,verbosemode=0):
         self.procs = []
         ins = read_file(self.fname)
         if verbosemode == 0:
@@ -646,7 +694,45 @@ class ProcessChange(object):
         lastlindex = 0
         stepcnt = 5000
         while lindex < len(sarr):
-            pass
+            l = sarr[lindex]
+            if int(lastlindex / stepcnt) != int(lindex / stepcnt):
+                if verbosemode == 0:
+                    if sys.stdout.isatty():
+                        if len(progressout) > 0:
+                            idx = 0
+                            while idx < len(progressout):
+                                sys.stdout.write('\b')
+                                idx += 1
+                            idx = 0
+                            while idx < len(progressout):
+                                sys.stdout.write(' ')
+                                idx += 1
+                            idx = 0
+                            while idx < len(progressout):
+                                sys.stdout.write('\b')
+                                idx += 1
+                        progressout = 'process %d'%(lindex)
+                        sys.stdout.write('%s'%(progressout))
+                        sys.stdout.flush()
+                lastlindex = lindex
+            l = l.rstrip('\n\r')
+
+            if nextattexpr.match(l):
+                curatttree = ParseAttMap()
+                lindex = curatttree.parse(lindex+1,sarr)
+                if curatttree.attmap is not None:
+                    self.procs.append(curatttree.attmap)
+                curatttree = None
+                continue
+            if nextdagexpr.match(l):
+                curdagtree = ParseDagNodeTree()
+                lindex = curdagtree.parse(lindex+1,sarr)
+                if curdagtree.dagtree is not None:
+                    self.procs.append(curdagtree.dagtree)
+                curdagtree = None
+                continue
+
+            lindex += 1
         return
 
 
