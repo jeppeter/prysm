@@ -106,11 +106,7 @@ func NewProtoArrayLMDGhost(d *dag.BeaconDag) dag.ForkChoice {
 	return res
 }
 
-func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
-	// diff values: we map changes into an array mirroring the current state arrays.
-	// These diff values can be propagated first, and then applied to the weights after.
-	// This makes it easy to recognize when a "change" cancels out somewhere:
-	//  the diff value will be 0, just like any non-change.
+func (gh *ProtoArrayLMDGhost) PrintState(note string) {
 	var outs string
 	var ii int
 	var bv uint64
@@ -129,6 +125,7 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 
 	}
 	outs += "]"
+	log.Printf("ProtoArrayLMDGhost.note %s\n", note)
 	log.Printf("ProtoArrayLMDGhost.bestchild %s\n", outs)
 	outs = "["
 	for ii, ibv = range gh.w {
@@ -169,6 +166,26 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 		log.Printf("ProtoArrayLMDGhost.node [%d]%s\n", ii, curnode.String())
 	}
 
+	outs = "{"
+	ii = 0
+	for curnode, bv = range gh.indices {
+		if ii > 0 {
+			outs += ","
+		}
+		outs += fmt.Sprintf("\"%s\":%d", curnode.Key.String(), bv)
+		ii += 1
+	}
+	outs += "}"
+	log.Printf("ProtoArrayLMDGhost.indices %s\n", outs)
+}
+
+func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
+	// diff values: we map changes into an array mirroring the current state arrays.
+	// These diff values can be propagated first, and then applied to the weights after.
+	// This makes it easy to recognize when a "change" cancels out somewhere:
+	//  the diff value will be 0, just like any non-change.
+
+	gh.PrintState("ApplyScoreChanges")
 	log.Printf("Start ApplyScoreChanges len(%d)\n", len(changes))
 	d := make([]int64, len(gh.nodes), len(gh.nodes))
 	start := int64(gh.indices[gh.dag.Finalized])
@@ -272,6 +289,7 @@ func (gh *ProtoArrayLMDGhost) OnNewNode(block *dag.DagNode) {
 	// new node points to itself as a best-target, since it is a leaf.
 	gh.t = append(gh.t, i)
 	gh.nodes = append(gh.nodes, block)
+	gh.PrintState("OnNewNode")
 }
 
 func (gh *ProtoArrayLMDGhost) OnPrune() {

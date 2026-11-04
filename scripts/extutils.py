@@ -34,10 +34,13 @@ class LmdAttest(object):
         self.validatorid = -1
         self.lindex = -1
         return
-    def set_attest(self,lindex,key,weight,validatorid):
+    def set_attest(self,key,weight,validatorid):
         self.key = key
         self.weight = weight
         self.validatorid = validatorid
+        return
+
+    def set_lindex(self,lindex):
         self.lindex = lindex
         return
 
@@ -60,6 +63,33 @@ class LmdAttestMap(object):
     def set_node(self,validatorid,attest):
         self.rdict['%s'%(validatorid)]= attest
         return
+
+
+class ScoreChange(object):
+    def __init__(self):
+        self.att = None
+        self.scorechange = 0
+        self.lindex = -1
+        return
+
+    def set_score(self,score):
+        self.scorechange = score
+        return
+
+    def set_lindex(self,lindex):
+        self.lindex = lindex
+        if self.att is not None:
+            self.att.set_lindex(lindex)
+        return
+
+    def set_att(self,key,weight,validatorid):
+        if self.att is None:
+            self.att = LmdAttest()
+            if self.lindex > 0:
+                self.att.set_lindex(lindex)
+        self.att.set_attest(key,weight,validatorid)
+        return
+
 
 
 class LmdDagNode(object):
@@ -174,8 +204,88 @@ class LmdDagTree(object):
             curdag = self.rdict[chldkey]
 
 
+class ProtoArrayLMDGhost(object):
+    def __init__(self):
+        self.lindex = -1
+        self.weights = []
+        self.bestchilds = []
+        self.indices = dict()
+        self.nodes = []
+        self.parents = []
+        self.targets = []
+        return
 
+    def set_lindex(self,lindex):
+        self.lindex = lindex
+        return
 
+    def set_weights(self,s):
+        try:
+            if isinstance(s, str):
+                nv = json.loads(s)
+            elif isinstance(s,list):
+                nv = s
+            else:
+                raise Exception('can not set weights %s'%(s))
+            self.weights = nv
+        except:
+            logging.error('%s'%(traceback.format_exc()))
+        return
+
+    def set_bestchilds(self,s):
+        try:
+            if isinstance(s, str):
+                nv = json.loads(s)
+            elif isinstance(s,list):
+                nv = s
+            else:
+                raise Exception('can not set bestchilds %s'%(s))
+            self.bestchilds = nv
+        except:
+            logging.error('%s'%(traceback.format_exc()))
+        return
+
+    def set_indices(self,s):
+        try:
+            if isinstance(s, str):
+                nv = json.loads(s)
+            elif isinstance(s,dict):
+                nv = s
+            else:
+                raise Exception('can not set indices %s'%(s))
+            self.indices = nv
+            self.nodes = [''] * len(self.indices.keys())
+            for (k,v) in self.indices.items():
+                self.nodes[v] = k
+        except:
+            logging.error('%s'%(traceback.format_exc()))
+        return
+
+    def set_parents(self,s):
+        try:
+            if isinstance(s, str):
+                nv = json.loads(s)
+            elif isinstance(s,list):
+                nv = s
+            else:
+                raise Exception('can not set parents %s'%(s))
+            self.parents = nv
+        except:
+            logging.error('%s'%(traceback.format_exc()))
+        return
+
+    def set_targets(self,s):
+        try:
+            if isinstance(s, str):
+                nv = json.loads(s)
+            elif isinstance(s,list):
+                nv = s
+            else:
+                raise Exception('can not set targets %s'%(s))
+            self.targets = nv
+        except:
+            logging.error('%s'%(traceback.format_exc()))
+        return
 
 
 class LmdPair(object):
@@ -317,9 +427,107 @@ class LmdPair(object):
         retval = self.check_attest(headdag.idx)
         return
 
+class ParseAttMap(object):
+    def __init__(self):
+        self.attmap = None
+        return
+
+    def parse(self,lindex,attexpr,lines):
+        passed = lindex
+        while passed < len(lines):
+            l = lines[passed]
+            l = l.rstrip('\r\n')
+            m = attexpr.findall(l)
+            if m is None or len(m) == 0 or len(m[0]) < 4:
+                return passed
+            if self.attmap is None:
+                self.attmap = LmdAttestMap(lindex)
+            curatt = LmdAttest()
+            validatorid = parse_int(m[0][2])
+            key = m[0][1]
+            weight = parse_int(m[0][3])
+            curatt.set_attest(key,weight,validatorid)
+            curatt.set_lindex(passed)
+            self.attmap.set_node(curatt.validatorid,curatt)
+            passed += 1
+        return passed
+
+class ParseDagNodeTree(object):
+    def __init__(self):
+        self.dagtree = None
+        return
+
+    def _calc_tabs(self,tabstr):
+        idx = 0
+        curtabs = ''
+        while True:
+            if curtabs == tabstr:
+                break
+            if len(curtabs) > len(tabstr):
+                raise Exception('not valid tabstr [%s][%d]'%(tabstr,len(tabstr)))
+            curtabs += '    '
+            idx += 1
+        return idx
+
+    def parse(self,lindex,dagexpr,lines):
+        passed = lindex
+        dagpushs = []
+        self.dagtree = None
+        while passed < len(lines):
+            l = lines[passed]
+            l = l.rstrip('\r\n')
+            m = dagexpr.findall(l)
+            if m is None or len(m) == 0 or len(m[0]) < 13:
+                dagpushs = []
+                return passed
+            tabs = self._calc_tabs(m[0][0])
+            ishead = False
+            if m[0][1] == '*':
+                ishead = True
+            idx = parse_int(m[0][2])
+            key = m[0][3]
+            slot = parse_int(m[0][4])
+            weight = parse_int(m[0][11])
+            if m[0][10] == 'nonExistentNode':
+                bestchild = -1
+            else:
+                bestchild = parse_int(m[0][10])
+            besttarget = parse_int(m[0][12])
+            # now to check the best                
+            parent = None
+            if True:
+                if tabs >= len(dagpushs):
+                    if len(dagpushs) > 0:
+                        parent = dagpushs[-1]
+                    dagpushs.append(key)
+                else:
+                    if tabs == (len(dagpushs) - 1):
+                        if len(dagpushs) > 1:
+                            parent = dagpushs[-2]
+                        if len(dagpushs) > 0:
+                            dagpushs[-1]= key
+                        else:
+                            dagpushs.append(key)
+                    else:
+                        dagpushs = dagpushs[:(tabs)]
+                        if len(dagpushs) > 0:
+                            parent = dagpushs[-1]
+                        dagpushs.append(key)
+            curdag = LmdDagNode()
+            curdag.set_node(lindex,idx,key,weight,besttarget,bestchild,slot,ishead,parent)
+            if self.dagtree is None:
+                self.dagtree = LmdDagTree(lindex)
+            self.dagtree.set_node(key,curdag)
+            self.dagtree.set_index_node(idx,key)
+            self.dagtree.set_child(parent,key)
+            passed += 1
+        return passed
 
 
-
+DAG_EXPR_STR = '^(\\s*)(\\*)?\\[([0-9]+)\\]DagNode\\[Key\\s+([0-9a-fA-F]+)\\s+Slot\\s+([0-9a-fA-FxX]+)\\s+Height\\s+([0-9a-fA-FxX]+)\\s+Weight\\s+([0-9a-fA-FxX]+)\\s+Proposer\\s+([0-9a-fA-FxX]+)(\\s+Parent\\.Key\\s+([0-9a-f]+))?\\]\\s+bestchild\\s+([^ ]+)\\s+weight\\s+([0-9]+)\\s+besttarget\\s([0-9]+)$'
+ATT_EXPR_STR = '^\\[([0-9]+)\\]\\s+Attestation\\[BeaconBlockRoot\\s+([a-f0-9A-F]+)\\s+ValidatorID\\s+([0-9a-fx]+)\\s+Weight\\s+([0-9a-fx]+)\\]$'
+NEXT_ATT_EXPR_STR = '.*\\s+agor$'
+NEXT_DAG_EXPR_STR = '.*\\s+HeadFn$'
 
 class LmdFilter(object):
     def __init__(self,fname):
@@ -345,112 +553,62 @@ class LmdFilter(object):
         sarr = re.split('\n',ins)
         if verbosemode == 0:
             sys.stdout.write('read [%s] %d lines\n'%(self.fname,len(sarr)))
-        nextattexpr = re.compile('.*\\s+agor$')
-        nextdagexpr = re.compile('.*\\s+HeadFn$')
+        nextattexpr = re.compile(NEXT_ATT_EXPR_STR)
+        nextdagexpr = re.compile(NEXT_DAG_EXPR_STR)
         isatt = False
         isdag = False
-        dagexpr = re.compile('^(\\s*)(\\*)?\\[([0-9]+)\\]DagNode\\[Key\\s+([0-9a-fA-F]+)\\s+Slot\\s+([0-9a-fA-FxX]+)\\s+Height\\s+([0-9a-fA-FxX]+)\\s+Weight\\s+([0-9a-fA-FxX]+)\\s+Proposer\\s+([0-9a-fA-FxX]+)(\\s+Parent\\.Key\\s+([0-9a-f]+))?\\]\\s+bestchild\\s+([^ ]+)\\s+weight\\s+([0-9]+)\\s+besttarget\\s([0-9]+)$')
-        attexpr = re.compile('^\\[([0-9]+)\\]\\s+Attestation\\[BeaconBlockRoot\\s+([a-f0-9A-F]+)\\s+ValidatorID\\s+([0-9a-fx]+)\\s+Weight\\s+([0-9a-fx]+)\\]$')
+        dagexpr = re.compile(DAG_EXPR_STR)
+        attexpr = re.compile(ATT_EXPR_STR)
         curdagtree = None
         curatttree = None
         curpair = None
         dagpushs = []
         lindex = 0
-        attlindex = 0
         progressout = ''
-        for l in sarr:
-            lindex += 1
-            if (lindex % 5000) == 0:
+        lastlindex = 0
+        stepcnt = 5000
+        while lindex < len(sarr):
+            l = sarr[lindex]
+            if int(lastlindex / stepcnt) != int(lindex / stepcnt):
                 if verbosemode == 0:
-                    if len(progressout) > 0:
-                        idx = 0
-                        while idx < len(progressout):
-                            sys.stdout.write('\b')
-                            idx += 1
-                        idx = 0
-                        while idx < len(progressout):
-                            sys.stdout.write(' ')
-                            idx += 1
-                        idx = 0
-                        while idx < len(progressout):
-                            sys.stdout.write('\b')
-                            idx += 1
-                    progressout = 'process %d'%(lindex)
-                    sys.stdout.write('%s'%(progressout))
-                    sys.stdout.flush()
+                    if sys.stdout.isatty():
+                        if len(progressout) > 0:
+                            idx = 0
+                            while idx < len(progressout):
+                                sys.stdout.write('\b')
+                                idx += 1
+                            idx = 0
+                            while idx < len(progressout):
+                                sys.stdout.write(' ')
+                                idx += 1
+                            idx = 0
+                            while idx < len(progressout):
+                                sys.stdout.write('\b')
+                                idx += 1
+                        progressout = 'process %d'%(lindex)
+                        sys.stdout.write('%s'%(progressout))
+                        sys.stdout.flush()
+                lastlindex = lindex
             l = l.rstrip('\n\r')
             if not isatt and not isdag:
                 if nextattexpr.match(l):
-                    isatt = True
-                    curatttree = LmdAttestMap(lindex)
+                    curatttree = ParseAttMap()
+                    lindex = curatttree.parse(lindex+1,attexpr,sarr)
+                    isatt = False
                     continue
                 if nextdagexpr.match(l):
                     isdag = True
-                    curdagtree = LmdDagTree(lindex)
-                    dagpushs = []                    
-                    continue
-            if isatt:
-                m = attexpr.findall(l)
-                if m is None or len(m) == 0 or len(m[0]) < 4:
-                    isatt = False
-                    continue
-                curatt = LmdAttest()
-                validatorid = parse_int(m[0][2])
-                key = m[0][1]
-                weight = parse_int(m[0][3])
-                curatt.set_attest(lindex,key,weight,validatorid)
-                curatttree.set_node(curatt.validatorid,curatt)
-                continue
-            if isdag:
-                m = dagexpr.findall(l)
-                if m is None or len(m) == 0 or len(m[0]) < 13:
-                    lmdpair = LmdPair()
-                    lmdpair.set_pair(curdagtree,curatttree)
-                    self.pairs.append(lmdpair)
+                    curdagtree = ParseDagNodeTree()
+                    lindex = curdagtree.parse(lindex+1,dagexpr,sarr)
+                    if curatttree is not None and curatttree.attmap is not None and curdagtree.dagtree is not None:
+                        lmdpair = LmdPair()
+                        lmdpair.set_pair(curdagtree.dagtree,curatttree.attmap)
+                        self.pairs.append(lmdpair)
                     curatttree = None
                     curdagtree = None
-                    dagpushs = []
                     isdag = False
                     continue
-                tabs = self._calc_tabs(m[0][0])
-                ishead = False
-                if m[0][1] == '*':
-                    ishead = True
-                idx = parse_int(m[0][2])
-                key = m[0][3]
-                slot = parse_int(m[0][4])
-                height = parse_int(m[0][11])
-                if m[0][10] == 'nonExistentNode':
-                    bestchild = -1
-                else:
-                    bestchild = parse_int(m[0][10])
-                besttarget = parse_int(m[0][12])
-                # now to check the best                
-                parent = None
-                if True:
-                    if tabs >= len(dagpushs):
-                        if len(dagpushs) > 0:
-                            parent = dagpushs[-1]
-                        dagpushs.append(key)
-                    else:
-                        if tabs == (len(dagpushs) - 1):
-                            if len(dagpushs) > 1:
-                                parent = dagpushs[-2]
-                            if len(dagpushs) > 0:
-                                dagpushs[-1]= key
-                            else:
-                                dagpushs.append(key)
-                        else:
-                            dagpushs = dagpushs[:(tabs)]
-                            if len(dagpushs) > 0:
-                                parent = dagpushs[-1]
-                            dagpushs.append(key)
-                curdag = LmdDagNode()
-                curdag.set_node(lindex,idx,key,weight,besttarget,bestchild,slot,ishead,parent)
-                curdagtree.set_node(key,curdag)
-                curdagtree.set_index_node(idx,key)
-                curdagtree.set_child(parent,key)
-                continue
+            lindex += 1
         return
 
     def check_pair(self):
@@ -459,6 +617,40 @@ class LmdFilter(object):
             self.pairs[idx].check_pair()
             idx += 1
         return
+
+
+class ProcessChange(object):
+    def __init__(self,fname):
+        self.fname = fname
+        self.procs = []
+        return
+
+    def parse(self):        
+        self.procs = []
+        ins = read_file(self.fname)
+        if verbosemode == 0:
+            sys.stdout.write('read [%s] %d buffer\n'%(self.fname,len(ins)))
+        sarr = re.split('\n',ins)
+        if verbosemode == 0:
+            sys.stdout.write('read [%s] %d lines\n'%(self.fname,len(sarr)))
+        nextattexpr = re.compile(NEXT_ATT_EXPR_STR)
+        nextdagexpr = re.compile(NEXT_DAG_EXPR_STR)
+        isatt = False
+        isdag = False
+        dagexpr = re.compile(DAG_EXPR_STR)
+        attexpr = re.compile(ATT_EXPR_STR)
+        curdagtree = None
+        curatttree = None
+        lindex = 0
+        progressout = ''
+        lastlindex = 0
+        stepcnt = 5000
+        while lindex < len(sarr):
+            pass
+        return
+
+
+
 
 
 
@@ -470,12 +662,20 @@ def lmdfilter_handler(args,parser):
     lmdfilter.check_pair()
     sys.exit(0)
 
+def applychange_handler(args,parser):
+    set_logging(args)
+    sys.exit(0)
+    return
+
 def load_base_parser(parser):
     commandline_fmt='''
     {
         "input|i" : null,
         "output|o" : null,
-        "lmdfilter<%s.lmdfilter_handler>##to filter lmd struct from input as output for %s##" : {
+        "lmdfilter<%s.lmdfilter_handler>##to filter lmd struct from input as output by %s##" : {
+            "$" : 0
+        },
+        "applychange<%s.applychange_handler>##to give the apply change from input as output by %s##" : {
             "$" : 0
         }
     }
@@ -483,7 +683,7 @@ def load_base_parser(parser):
     lmdfile = os.path.abspath(os.path.join(os.path.dirname(__file__),'..','testing','lmd-ghost','lmd-ghost'))
     if is_windows():
         lmdfile = lmdfile.replace('\\','\\\\')
-    commandline = commandline_fmt%(__name__,lmdfile)
+    commandline = commandline_fmt%(__name__,lmdfile,__name__,lmdfile)
     parser.load_command_line_string(commandline)
     return parser
 
