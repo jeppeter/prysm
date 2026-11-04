@@ -67,6 +67,13 @@ func GetExeFile() (exename string, err error) {
 }
 
 func check_blst_verify() (err error) {
+	err = nil
+	defer func() {
+		if err2 := recover(); err2 != nil {
+			log.Errorf("recover error %v", err2)
+			err = fmt.Errorf("%v", err2)
+		}
+	}()
 	priv, err := blst.RandKey()
 	if err != nil {
 		return
@@ -79,7 +86,6 @@ func check_blst_verify() (err error) {
 		err = fmt.Errorf("can not verify blst")
 		return
 	}
-	err = nil
 	return
 
 }
