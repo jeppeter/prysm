@@ -187,7 +187,118 @@ class LmdPair(object):
     def set_pair(self,dag, att):
         self.dagtree = dag
         self.atttree = att
+        self.errors = []
         return
+
+    def _check_attest_key(self,selkey,nwdict,headidx):
+        if selkey not in self.dagtree.rdict.keys():
+            self.errors.append('[%d] selkey %s not found in dagtree'%(self.dagtree.lindex,selkey))
+            return False
+        curdag = self.dagtree.rdict[selkey]        
+        if curdag.key not in self.dagtree.childmap.keys():
+            if curdag.idx == headidx:
+                return True
+            for (k,v) in nwdict.items():
+                self.errors.append('[%d] [%s] = [%d]'%(self.dagtree.lindex,k,v))
+            self.errors.append('[%d] key %s has childs'%(self.dagtree.lindex,curdag.key))
+            return False
+        chlds = self.dagtree.childmap[curdag.key]
+        # now to make sure the values
+        selkeys = []
+        selval = 0
+        for key in chlds:
+            if key in nwdict.keys():
+                if nwdict[key] > selval:
+                    selval = nwdict[key]
+                    selkeys = [key]
+                elif nwdict[key] == selval:
+                    selkeys.append(key)
+                    
+        if len(selkeys) == 0:
+            # this will pickup the 
+            fdag = self.dagtree.get_head_node(curdag.key)
+            if fdag is None:
+                for (k,v) in nwdict.items():
+                    self.errors.append('[%d] [%s] = [%d]'%(self.dagtree.lindex,k,v))
+                self.errors.append('[%d] key %s children not found in nwdict'%(self.dagtree.lindex,curdag.key))
+                logging.info(' ')
+                return False
+            if fdag.idx != headidx:
+                for (k,v) in nwdict.items():
+                    self.errors.append('[%d] [%s] = [%d]'%(self.dagtree.lindex,k,v))
+                self.errors.append('[%d] key %s children not match idx'%(self.dagtree.lindex,curdag.key))
+                logging.info(' ')
+                return False
+            return True
+        for ckey in selkeys:
+            retval = self._check_attest_key(ckey,nwdict,headidx)
+            if retval:
+                return True
+        return False
+
+    def _format_tab(self,tabs):
+        outs = ''
+        idx = 0
+        while idx < tabs:
+            outs += '    '
+            idx += 1
+        return outs
+
+    def _output_nwdict(self,key,nwdict,tabs):
+        outs = ''
+        if key not in nwdict.keys():
+            return outs
+        outs += self._format_tab(tabs)
+        outs += '%s weight %d\n'%(key,nwdict[key])
+        if key in self.dagtree.childmap.keys():
+            chlds = self.dagtree.childmap[key]
+            for k in chlds:
+                if k in nwdict.keys():
+                    outs += self._output_nwdict(k,nwdict,tabs+1)
+        return outs
+
+
+
+    def check_attest(self,headidx):
+        # now to give the weights
+        wdict = dict()
+        hkeys = []
+        for (k,v) in self.atttree.rdict.items():
+            if v.key not in wdict.keys():
+                wdict[v.key] = 0
+            wdict[v.key] += v.weight
+        nwdict = dict()
+        for (k,weight) in wdict.items():
+            if k not in nwdict.keys():
+                nwdict[k] = 0
+            #logging.info('nwdict[%s] += %d (%d => %d)'%(k,weight,nwdict[k],nwdict[k] + weight))
+            nwdict[k] += weight
+            if k in self.dagtree.rdict.keys():
+                curdag = self.dagtree.rdict[k]
+                # now we add the value for the parent
+                curparent = curdag.parent
+                while curparent is not None:
+                    if curparent not in self.dagtree.rdict.keys():
+                        sys.stderr.write('[%d] not find parent %s\n'%(self.dagtree.lindex,curparent))
+                        return False
+                    if curparent not in nwdict.keys():
+                        nwdict[curparent] = 0
+                    #logging.info('nwdict[%s] += %d (%d => %d)'%(curparent,weight,nwdict[curparent],nwdict[curparent] + weight))
+                    nwdict[curparent] += weight
+                    curdag = self.dagtree.rdict[curparent]
+                    curparent = curdag.parent
+        # now we should check for the values
+        logging.info('\n%s'%(self._output_nwdict(self.dagtree.root,nwdict,0)))
+        if self.dagtree.root is None:
+            sys.stderr.write('[%d] no root\n'%(self.dagtree.lindex))
+            return False
+        self.errors = []
+        retval = self._check_attest_key(self.dagtree.root,nwdict,headidx)
+        if not retval:
+            for l in self.errors:
+                sys.stderr.write('%s\n'%(l))
+            return False
+        return True
 
 
 
@@ -195,11 +306,15 @@ class LmdPair(object):
         # now to give the root
         if self.dagtree.root is not None:
             headdag = self.dagtree.get_head_node(self.dagtree.root)
+        else:
+            return
         # now we should get the dag for bestchild get 
 
         retval = self.dagtree.check_best_child_as_head(headdag.idx)
         if not retval:
             sys.stderr.write('[%d] can not check head ok\n'%(self.dagtree.lindex))
+
+        retval = self.check_attest(headdag.idx)
         return
 
 
@@ -333,8 +448,8 @@ class LmdFilter(object):
                 curdag = LmdDagNode()
                 curdag.set_node(lindex,idx,key,weight,besttarget,bestchild,slot,ishead,parent)
                 curdagtree.set_node(key,curdag)
-                curdagtree.set_child(parent,key)
                 curdagtree.set_index_node(idx,key)
+                curdagtree.set_child(parent,key)
                 continue
         return
 

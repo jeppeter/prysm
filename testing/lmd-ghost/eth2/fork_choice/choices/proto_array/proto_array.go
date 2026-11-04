@@ -111,6 +111,63 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 	// These diff values can be propagated first, and then applied to the weights after.
 	// This makes it easy to recognize when a "change" cancels out somewhere:
 	//  the diff value will be 0, just like any non-change.
+	var outs string
+	var ii int
+	var bv uint64
+	var ibv int64
+	var curnode *dag.DagNode
+	outs = "["
+	for ii, bv = range gh.b {
+		if ii > 0 {
+			outs += ","
+		}
+		if bv == nonExistentNode {
+			outs += fmt.Sprintf("-1")
+		} else {
+			outs += fmt.Sprintf("%d", bv)
+		}
+
+	}
+	outs += "]"
+	log.Printf("ProtoArrayLMDGhost.bestchild %s\n", outs)
+	outs = "["
+	for ii, ibv = range gh.w {
+		if ii > 0 {
+			outs += ","
+		}
+		outs += fmt.Sprintf("%d", ibv)
+	}
+	outs += "]"
+	log.Printf("ProtoArrayLMDGhost.weight %s\n", outs)
+
+	outs = "["
+	for ii, bv = range gh.p {
+		if ii > 0 {
+			outs += ","
+		}
+		if bv == nonExistentNode {
+			outs += fmt.Sprintf("-1")
+		} else {
+			outs += fmt.Sprintf("%d", bv)
+		}
+
+	}
+	outs += "]"
+	log.Printf("ProtoArrayLMDGhost.parent %s\n", outs)
+
+	outs = "["
+	for ii, bv = range gh.t {
+		if ii > 0 {
+			outs += ","
+		}
+		outs += fmt.Sprintf("%d", bv)
+	}
+	outs += "]"
+	log.Printf("ProtoArrayLMDGhost.target %s\n", outs)
+
+	for ii, curnode = range gh.nodes {
+		log.Printf("ProtoArrayLMDGhost.node [%d]%s\n", ii, curnode.String())
+	}
 
 	log.Printf("Start ApplyScoreChanges len(%d)\n", len(changes))
 	d := make([]int64, len(gh.nodes), len(gh.nodes))
