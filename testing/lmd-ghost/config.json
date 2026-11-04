@@ -1,7 +1,8 @@
 {
-	"blocks" : 50,
-	"validatorcount" : 3,
-	"attestationsperblock" : 3,
+	"blocks" : 500,
+	"validatorcount" : 5,
+	"attestationsperblock" : 5,
 	"genesisslot" : 100,
-	"epochlength" : 3
+	"epochlength" : 10,
+	"slotskipchance" : 0.9
 }

@@ -418,7 +418,7 @@ def read_file(infile=None):
         rdata = b''
         while True:
             try:
-                l = fin.read(64 * 1024)
+                l = fin.read(1024 * 1024)
                 if l is None or len(l) == 0:
                     break
                 rdata += l
