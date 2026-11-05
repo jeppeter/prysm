@@ -79,6 +79,10 @@ func (s *Simulation) getRandomTarget() *dag.DagNode {
 	upCount := 0
 	target := s.Chain.Dag.Nodes[s.Chain.Head]
 	for {
+		if target != nil && s.Chain.Dag.Finalized == target {
+			/*we get the top*/
+			break
+		}
 		if target.Parent != nil && s.RNG.Float64() < s.Config.LatencyFactor {
 			target = target.Parent
 			upCount++
@@ -181,6 +185,8 @@ func (s *Simulation) RunSim() {
 		panic("justification is too quick")
 	}
 	for n := uint64(0); n < s.Config.Blocks; n++ {
+		/*we update head for it will give ok*/
+		s.Chain.UpdateHead()
 		head := s.Chain.Dag.Nodes[s.Chain.Head]
 		log.Printf("[%d] head %s\n", n, head.String())
 		epoch := head.Slot / s.Config.EpochLength
@@ -190,6 +196,7 @@ func (s *Simulation) RunSim() {
 			log.Printf("finalizedEpoch %d s.Chain.Dag.Finalized.Slot(%d)/s.Config.EpochLength(%d) %d\n", finalizedEpoch, s.Chain.Dag.Finalized.Slot, s.Config.EpochLength, s.Chain.Dag.Finalized.Slot/s.Config.EpochLength)
 			if finalizedEpoch > s.Chain.Dag.Finalized.Slot/s.Config.EpochLength {
 				f := s.Chain.Dag.Justified
+				log.Printf("first Finalized f %s\n", f.String())
 				for f != nil && f.Slot/s.Config.EpochLength > finalizedEpoch {
 					var pkey string
 					pkey = ""
@@ -200,12 +207,32 @@ func (s *Simulation) RunSim() {
 					f = f.Parent
 				}
 				if f != nil && f != s.Chain.Dag.Finalized {
-					log.Printf("f %s Finalized", f.String())
-					s.Chain.Dag.Finalize(f.Key)
-					arrs := s.Chain.Dag.FinalizeChain()
-					for ii, cc := range arrs {
-						log.Printf("[%d][%s]\n", ii, cc.String())
+					/*we only set the for finalized on the Top of chain Head*/
+					if s.Chain.Dag.CheckIfSubTree(f.Key, s.Chain.Head) && s.Chain.Dag.CheckIfSubTree(f.Key, s.Chain.Dag.Justified.Key) {
+						log.Printf("f %s Finalized Ok\n", f.String())
+						s.Chain.Dag.Finalize(f.Key)
+						arrs := s.Chain.Dag.FinalizeChain()
+						for ii, cc := range arrs {
+							log.Printf("[%d][%s]\n", ii, cc.String())
+						}
+					} else {
+						/*now for the next level*/
+						var setted bool = false
+						for _, curk := range s.Chain.Dag.Finalized.Children {
+							if curk.Slot/s.Config.EpochLength > finalizedEpoch && s.Chain.Dag.CheckIfSubTree(curk.Key, s.Chain.Head) && s.Chain.Dag.CheckIfSubTree(curk.Key, s.Chain.Dag.Justified.Key) {
+								/*if we can not find the valid ,so we should give the children to selected*/
+								log.Printf("f %s Finalized Ok\n", f.String())
+								s.Chain.Dag.Finalize(f.Key)
+								setted = true
+								break
+							}
+						}
+						if !setted {
+							log.Printf("f %s Finalized Not Match\n", f.String())
+						}
+
 					}
+
 				}
 			}
 		}
@@ -233,9 +260,9 @@ func (s *Simulation) RunSim() {
 		}
 		for a := uint64(0); a < s.Config.AttestationsPerBlock; a++ {
 			s.SimNewAttestation()
-			if a%headUpdateInterval == headUpdateInterval-1 {
-				s.Chain.UpdateHead()
-			}
+			//if a%headUpdateInterval == headUpdateInterval-1 {
+			s.Chain.UpdateHead()
+			//}
 		}
 		attestationCounter += s.Config.AttestationsPerBlock
 		// head will update after adding a block

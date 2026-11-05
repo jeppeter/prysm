@@ -163,3 +163,31 @@ func (dag *BeaconDag) FinalizeChain() (retarr []common.Hash256) {
 	}
 	return
 }
+
+func (dag *BeaconDag) CheckIfSubTree(tophash common.Hash256, childhash common.Hash256) (bval bool) {
+	var chdag *DagNode
+	var topdag *DagNode
+	var ok bool
+	bval = false
+	chdag, ok = dag.Nodes[childhash]
+	if !ok {
+		return
+	}
+	topdag, ok = dag.Nodes[tophash]
+	if !ok {
+		return
+	}
+
+	for {
+		if chdag == topdag {
+			bval = true
+			return
+		}
+		if chdag.Parent == nil {
+			/*no parent ,so we should not do this*/
+			return
+		}
+		chdag = chdag.Parent
+	}
+
+}

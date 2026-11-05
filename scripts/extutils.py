@@ -1064,7 +1064,22 @@ class EvmRun(object):
     def apply_new_node(self,node):
         if self.protoarray is None:
             return True
-        # now to append the proto
+        # now to append the block
+        sidx = len(self.protoarray.nodes)
+        self.protoarray.indices[node.key] = sidx
+        self.protoarray.bestchilds.append(-1)
+        self.protoarray.weights.append(0)
+
+        if node.parent is None:
+            self.protoarray.parents.append(-1)
+        else:
+            if node.parent in self.protoarray.indices.keys():
+                pi = self.protoarray.indices[node.parent]
+                self.protoarray.parents.append(pi)
+                if self.protoarray.bestchilds[pi] == -1:
+                    self.protoarray.bestchilds[pi] = sidx
+            else:
+                self.protoarray.parents.append(-1)
         return True
 
     def apply_att_map(self,attmap):

@@ -1,8 +1,10 @@
 {
-	"blocks" : 500,
+	"blocks" : 1000,
 	"validatorcount" : 5,
 	"attestationsperblock" : 5,
 	"genesisslot" : 100,
 	"epochlength" : 10,
-	"slotskipchance" : 0.9
+	"slotskipchance" : 0.9,
+	"finalizeepochsago" : 10,
+	"justifyepochsago" : 2
 }

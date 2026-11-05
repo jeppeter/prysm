@@ -172,11 +172,12 @@ func (gh *ProtoArrayLMDGhost) PrintState(note string) {
 		if ii > 0 {
 			outs += ","
 		}
-		outs += fmt.Sprintf("\"%s\":%d", curnode.Key.String(), bv)
+		outs += fmt.Sprintf("\"%s\": %d", curnode.Key.String(), bv)
 		ii += 1
 	}
 	outs += "}"
 	log.Printf("ProtoArrayLMDGhost.indices %s\n", outs)
+	log.Printf("ProtoArrayLMDGhost.pruneidx %d\n", gh.pruneidx)
 }
 
 func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
@@ -222,22 +223,15 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 	}
 	// back-prop best-child/target updates
 	for i := int64(len(d)) - 1; i >= start; i-- {
-		// propagate best-target
-		if bi := gh.b[i]; bi != nonExistentNode {
-			pp = gh.nodes[i]
-			cnode = gh.nodes[bi]
-			log.Printf("t[%d][%s] 0x%x => 0x%x (t[%d][%s])\n", i, pp.Key.String(), gh.t[i], gh.t[bi], bi, cnode.Key.String())
-			gh.t[i] = gh.t[bi]
-		}
 		// if this note did not change at all, then skip it
 		if d[i] == 0 {
-			log.Printf("continue for [%s] d[%d] == 0\n", gh.nodes[i].Key.String(), i)
+			//log.Printf("continue for [%s] d[%d] == 0\n", gh.nodes[i].Key.String(), i)
 			continue
 		}
 		// parent of i (may not exist)
 		pi := gh.p[i]
 		if pi == nonExistentNode {
-			log.Printf("continue parent for [%s] == nonExistentNode\n", gh.nodes[i].Key.String())
+			//log.Printf("continue parent for [%s] == nonExistentNode\n", gh.nodes[i].Key.String())
 			continue
 		}
 		ui := uint64(i)
@@ -248,6 +242,19 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 			pp = gh.nodes[pi]
 			log.Printf("b[%d][%s] 0x%x => 0x%x\n", pi, pp.Key.String(), gh.b[pi], ui)
 			gh.b[pi] = ui
+			continue
+		}
+	}
+
+	for i := int64(len(d)) - 1; i >= start; i-- {
+		pi := gh.p[i]
+		if pi == nonExistentNode {
+			continue
+		}
+		ui := uint64(i)
+		// best child of the parent of i
+		bpi := gh.b[pi]
+		if bpi == nonExistentNode {
 			continue
 		}
 		// if i is already the best, don't do any work
@@ -262,8 +269,18 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 			}
 		}
 	}
+
+	for i := int64(len(d)) - 1; i >= start; i-- {
+		// propagate best-target
+		if bi := gh.b[i]; bi != nonExistentNode {
+			pp = gh.nodes[i]
+			cnode = gh.nodes[bi]
+			log.Printf("t[%d][%s] 0x%x => 0x%x (t[%d][%s])\n", i, pp.Key.String(), gh.t[i], gh.t[bi], bi, cnode.Key.String())
+			gh.t[i] = gh.t[bi]
+		}
+	}
 	log.Printf("End ApplyScoreChanges\n")
-	gh.PrintState("ApplyScoreChanges")
+	//gh.PrintState("ApplyScoreChanges")
 }
 
 func (gh *ProtoArrayLMDGhost) OnNewNode(block *dag.DagNode) {
@@ -292,7 +309,7 @@ func (gh *ProtoArrayLMDGhost) OnNewNode(block *dag.DagNode) {
 	// new node points to itself as a best-target, since it is a leaf.
 	gh.t = append(gh.t, i)
 	gh.nodes = append(gh.nodes, block)
-	gh.PrintState("OnNewNode")
+	//gh.PrintState("OnNewNode")
 }
 
 func (gh *ProtoArrayLMDGhost) OnPrune() {
@@ -355,8 +372,10 @@ func (gh *ProtoArrayLMDGhost) innerhead() *dag.DagNode {
 func (gh *ProtoArrayLMDGhost) HeadFn() *dag.DagNode {
 	// look up the index of the finalized node, this is our starting point
 	i := gh.indices[gh.dag.Finalized]
+	log.Printf("SearchHead start %d\n", i)
 	for {
 		if bi := gh.b[i]; bi != nonExistentNode {
+			log.Printf("SearchHead i %d => bi %d\n", i, bi)
 			i = bi
 		} else {
 			break
