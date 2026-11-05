@@ -67,6 +67,32 @@ class LmdAttestMap(object):
 
 class ScoreChange(object):
     def __init__(self):
+        self.key = ''
+        self.score = 0
+        self.validatorid = -1
+        self.slot = slot
+        return
+
+    def set_key(self,key):
+        self.key = key
+        return
+
+    def set_score(self,score):
+        self.score = score
+        return
+
+    def set_validatorid(self,validatorid):
+        self.validatorid = validatorid
+        return
+
+    def set_slot(self,slot):
+        self.slot = slot
+        return
+
+
+
+class ScoreChange(object):
+    def __init__(self):
         self.att = None
         self.scorechange = 0
         self.lindex = -1
@@ -90,6 +116,40 @@ class ScoreChange(object):
         self.att.set_attest(key,weight,validatorid)
         return
 
+class DagNode(object):
+    def __init__(self):
+        self.idx = -1
+        self.key = ''
+        self.weight = -1
+        self.parent = None
+        self.slot = -1
+        self.lindex = -1
+        self.validatorid = -1
+        return
+
+    def set_lindex(self,lindex):
+        self.lindex = lindex
+        return
+    def set_key(self,key):
+        self.key = key
+        return
+
+    def set_weight(self,weight):
+        self.weight = weight
+        return
+
+    def set_slot(self,slot):
+        self.slot = slot
+        return
+
+    def set_parent(self,parent):
+        self.parent = parent
+        return
+
+    def set_validatorid(self,validatorid):
+        self.validatorid = validatorid
+        return
+
 
 
 class LmdDagNode(object):
@@ -104,6 +164,48 @@ class LmdDagNode(object):
         self.lindex = -1
         self.bestchild = -1
         return
+
+    def deep_copy(self):
+        ret = LmdDagNode()
+        ret.set_lindex(self.lindex)
+        ret.set_key(self.key)
+        ret.set_weight(self.weight)
+
+    def set_lindex(self,lindex):
+        self.lindex = lindex
+        return
+    def set_key(self,key):
+        self.key = key
+        return
+
+    def set_weight(self,weight):
+        self.weight = weight
+        return
+
+    def set_bestchild(self,bestchild):
+        self.bestchild = bestchild
+        return
+
+    def set_besttarget(self,besttarget):
+        self.besttarget = besttarget
+        return
+
+    def set_slot(self,slot):
+        self.slot = slot
+        return
+
+    def set_ishead(self,ishead):
+        self.ishead = ishead
+        return
+
+    def set_idx(self,idx):
+        self.idx = idx
+        return
+
+    def set_parent(self,parent):
+        self.parent = parent
+        return
+
     def set_node(self,lindex,idx,key,weight,besttarget,bestchild,slot,ishead = False,parent=None):
         self.idx = idx
         self.key = key
@@ -215,6 +317,82 @@ class ProtoArrayLMDGhost(object):
         self.targets = []
         return
 
+    def deep_copy(self):
+        retgh = ProtoArrayLMDGhost()
+        retgh.set_lindex(self.lindex)
+        retgh.set_weights(self.weights)
+        retgh.set_bestchilds(self.bestchilds)
+        retgh.set_indices(self.indices)
+        retgh.set_nodes(self.nodes)
+        retgh.set_parents(self.parents)
+        retgh.set_targets(self.targets)
+        return retgh
+
+    def _cmp_list_raise(self,sarr,oarr,note,raiseexp):
+        if sarr != oarr:
+            if raiseexp:
+                if len(sarr) != len(oarr):
+                    raise Exception('%s len (%d) != len (%d)'%(note,len(sarr),len(oarr)))
+                idx = 0
+                while idx < len(sarr):
+                    if sarr[idx] != oarr[idx]:
+                        raise Exception('%s [%d] [%d] != [%d]'%(note,idx,sarr[idx],oarr[idx]))
+                    idx += 1
+            return False
+        return True
+
+    def _cmp_dict_raise(self,sdict,odict,note,raiseexp):
+        for k in sdict.keys():
+            if k not in odict.keys():
+                if raiseexp:
+                    raise Exception('%s self [%s] not in other'%(note,k))
+                return False
+            if sdict[k] != odict[k]:
+                if raiseexp:
+                    raise Exception('%s self [%s] [%s] != other [%s] [%s]'%(note,k,sdict[k],k,odict[k]))
+                return False
+
+        for k in odict.keys():
+            if k not in sdict.keys():
+                if raiseexp:
+                    raise Exception('%s other [%s] not in self'%(note,k))
+                return False
+            if sdict[k] != odict[k]:
+                if raiseexp:
+                    raise Exception('%s other [%s] [%s] != self [%s] [%s]'%(note,k,odict[k],k,sdict[k]))
+                return False
+        return True
+
+        
+
+
+    def eq_op(self,other,raiseexp=False):
+        retval = self._cmp_list_raise(self.weights,other.weights,'weights',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_list_raise(self.bestchilds,other.bestchilds,'bestchilds',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_dict_raise(self.indices,other.indices,'indices',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_list_raise(self.nodes,other.nodes,'nodes',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_list_raise(self.targets,other.targets,'targets',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_list_raise(self.parents,other.parents,'parents',raiseexp)
+        if not retval:
+            return False
+        return True
+
+    def __eq__(self,other):
+        return self.eq_op(other,False)
+
+    def __ne__(self,other):
+        return not self.eq_op(other,False)
+
     def set_lindex(self,lindex):
         self.lindex = lindex
         return
@@ -294,6 +472,8 @@ PROTO_PARENT_EXPR_STR = '^.*ProtoArrayLMDGhost\\.parent\\s+(\\[[0-9\\-,]+\\])$'
 PROTO_TARGET_EXPR_STR = '^.*ProtoArrayLMDGhost\\.target\\s+(\\[[0-9,]+\\])$'
 PROTO_INDICES_EXPR_STR = '^.*ProtoArrayLMDGhost\\.indices\\s+(.*)$'
 PROTO_NODE_EXPR_STR = '^.*ProtoArrayLMDGhost\\.node\\s+(.*)$'
+NEWNODE_DAG_EXPR_STR = '^.*OnNewNode\\.DagNode\\s+DagNode\\[Key\\s+([a-f0-9]+)\\s+Slot\\s+([0-9xa-f]+)\\s+Height\\s+([0-9xa-f]+)\\s+Weight\\s+([0-9xa-f]+)\\s+Proposer\\s+([0-9xa-f]+)(\\s+Parent\\.Key\\s+([0-9a-f]+))?\\]$'
+APPLYCHANGE_SCORECHANGE_EXPR_STR = '^.*ApplyScoreChanges\\.ScoreChange\\s+ScoreChange\\[\\s+Target\\s+DagNode\\[Key\\s+([a-f0-9]+)\\s+Slot\\s+([0-9xa-f]+)\\s+Height\\s+([0-9xa-f]+)\\s+Weight\\s+([0-9xa-f]+)\\s+Proposer\\s+([0-9xa-f]+)(\\s+Parent\\.Key\\s+([0-9a-f]+))?\\]\\s+ScoreDelta\\s+([0-9a-f\\-x]+)\\]$'
 
 class ParseProtoArray(object):
     def __init__(self):
@@ -476,6 +656,34 @@ class LmdPair(object):
 DAG_EXPR_STR = '^(\\s*)(\\*)?\\[([0-9]+)\\]DagNode\\[Key\\s+([0-9a-fA-F]+)\\s+Slot\\s+([0-9a-fA-FxX]+)\\s+Height\\s+([0-9a-fA-FxX]+)\\s+Weight\\s+([0-9a-fA-FxX]+)\\s+Proposer\\s+([0-9a-fA-FxX]+)(\\s+Parent\\.Key\\s+([0-9a-f]+))?\\]\\s+bestchild\\s+([^ ]+)\\s+weight\\s+([0-9]+)\\s+besttarget\\s([0-9]+)$'
 ATT_EXPR_STR = '^\\[([0-9]+)\\]\\s+Attestation\\[BeaconBlockRoot\\s+([a-f0-9A-F]+)\\s+ValidatorID\\s+([0-9a-fx]+)\\s+Weight\\s+([0-9a-fx]+)\\]$'
 
+class ParseScoreChanges(object):
+    def __init__(self):
+        self.scorechanges = []
+        return
+
+    def parse(self,lindex,sarr):
+        passed = lindex
+        scoreexpr = re.compile(APPLYCHANGE_SCORECHANGE_EXPR_STR)
+        while passed < len(sarr):
+            l = sarr[passed]
+            l = l.rstrip('\r\n')
+            m = scoreexpr.findall(l)
+            if m is None or len(m) == 0 or len(m[0]) < 8:
+                return passed
+            key = m[0][0]
+            slot = parse_int(m[0][1])
+            validatorid = parse_int(m[0][4])
+            score = parse_int(m[0][7])
+
+            curscore = ScoreChange()
+            curscore.set_lindex(passed)
+            curscore.set_slot(slot)
+            curscore.set_key(key)
+            curscore.set_score(score)
+            curscore.set_validatorid(validatorid)
+            self.scorechanges.append(curscore)
+            passed += 1
+        return passed
 
 class ParseAttMap(object):
     def __init__(self):
@@ -576,6 +784,37 @@ class ParseDagNodeTree(object):
         return passed
 
 
+class ParseDagNode(object):
+    def __init__(self):
+        self.dagnode = None
+        return
+
+    def parse(self,lindex,sarr):
+        passed = lindex
+        expr = re.compile(NEWNODE_DAG_EXPR_STR)
+        m = expr.findall(sarr[passed])
+        if m is None or len(m) == 0 or len(m[0]) < 7:
+            return passed
+        key = m[0][0]
+        slot = parse_int(m[0][1])
+        height = parse_int(m[0][2])
+        weight = parse_int(m[0][3])
+        validatorid = parse_int(m[0][4])
+        parent = None
+        if len(m[0][6]) != 0:
+            parent = m[0][6]
+        if self.dagnode is None:
+            self.dagnode = DagNode()
+        self.dagnode.set_lindex(lindex)
+        self.dagnode.set_key(key)
+        self.dagnode.set_height(height)
+        self.dagnode.set_weight(weight)
+        self.dagnode.set_validatorid(validatorid)
+        self.dagnode.set_parent(parent)
+        passed += 1
+        return passed
+
+
 NEXT_ATT_EXPR_STR = '.*\\s+agor$'
 NEXT_DAG_EXPR_STR = '.*\\s+HeadFn$'
 
@@ -667,6 +906,17 @@ class LmdFilter(object):
         return
 
 
+class EvmRun(object):
+    def __init__(self):
+        self.protoarray = None
+        self.atttree = None
+        self.dagtree = None
+        return
+
+    def check_protoarray(self,protoarray):
+
+
+
 class ProcessChange(object):
     def __init__(self,fname):
         self.fname = fname
@@ -693,6 +943,8 @@ class ProcessChange(object):
         progressout = ''
         lastlindex = 0
         stepcnt = 5000
+        newnodeexpr = re.compile(NEWNODE_DAG_EXPR_STR)
+        scoreexpr = re.compile(APPLYCHANGE_SCORECHANGE_EXPR_STR)
         while lindex < len(sarr):
             l = sarr[lindex]
             if int(lastlindex / stepcnt) != int(lindex / stepcnt):
@@ -731,6 +983,20 @@ class ProcessChange(object):
                     self.procs.append(curdagtree.dagtree)
                 curdagtree = None
                 continue
+
+            if newnodeexpr.match(l):
+                curdagnode = ParseDagNode()
+                lindex = curdagnode.parse(lindex,sarr)
+                if curdagnode.dagnode is not None:
+                    self.procs.append(curdagnode.dagnode)
+                continue
+
+            if scoreexpr.match(l):
+                curscore = ParseScoreChanges()
+                lindex = curscore.parse(lindex,sarr)
+                self.procs.extend(curscore.scorechanges)
+                continue
+
 
             lindex += 1
         return

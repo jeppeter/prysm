@@ -111,12 +111,10 @@ func (dag *BeaconDag) SyncChanges() {
 		if v.PrevWeight != v.Weight {
 			// get delta
 			delta := int64(v.Weight) - int64(v.PrevWeight)
-			log.Printf("delta v[%s] 0x%x - 0x%x = 0x%x\n", k.String(), v.Weight, v.PrevWeight, delta)
 			// resolve difference in weight
 			v.PrevWeight = v.Weight
 			// remember the change, append it to our "to do" list of changes
 			changes = append(changes, ScoreChange{Target: dag.Nodes[k], ScoreDelta: delta})
-			log.Printf("append %s\n", changes[len(changes)-1].String())
 		}
 	}
 	dag.ForkChoice.ApplyScoreChanges(changes)

@@ -184,8 +184,10 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 	// These diff values can be propagated first, and then applied to the weights after.
 	// This makes it easy to recognize when a "change" cancels out somewhere:
 	//  the diff value will be 0, just like any non-change.
+	for _, c := range changes {
+		log.Printf("ApplyScoreChanges.ScoreChange %s\n", c.String())
+	}
 
-	gh.PrintState("ApplyScoreChanges")
 	log.Printf("Start ApplyScoreChanges len(%d)\n", len(changes))
 	d := make([]int64, len(gh.nodes), len(gh.nodes))
 	start := int64(gh.indices[gh.dag.Finalized])
@@ -261,10 +263,11 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 		}
 	}
 	log.Printf("End ApplyScoreChanges\n")
-	log.Printf("ApplyScoreChanges\n%s\n", gh.PrintMap())
+	gh.PrintState("ApplyScoreChanges")
 }
 
 func (gh *ProtoArrayLMDGhost) OnNewNode(block *dag.DagNode) {
+	log.Printf("OnNewNode.DagNode %s\n", block.String())
 	i := uint64(len(gh.nodes))
 	gh.indices[block] = i
 	// the new node does not have a best-child
