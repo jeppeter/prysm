@@ -195,9 +195,11 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 	var pp *dag.DagNode
 	var cnode *dag.DagNode
 	for _, c := range changes {
-		i := gh.indices[c.Target]
-		log.Printf("d[%d][%s] 0x%x => 0x%x\n", i, c.Target.Key.String(), d[i], d[i]+c.ScoreDelta)
-		d[i] += c.ScoreDelta
+		i, ok := gh.indices[c.Target]
+		if ok {
+			log.Printf("d[%d][%s] 0x%x => 0x%x\n", i, c.Target.Key.String(), d[i], d[i]+c.ScoreDelta)
+			d[i] += c.ScoreDelta
+		}
 	}
 	// back-prop diff values
 	for i := int64(len(d)) - 1; i >= start; i-- {
