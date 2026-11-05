@@ -259,13 +259,15 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 		}
 		// if i is already the best, don't do any work
 		// if i changed better than the bpi, then it's worth looking at.
-		if bpi != ui && d[i] > d[bpi] {
+		//if bpi != ui && d[i] > d[bpi] {
+		if bpi != ui {
 			// now look at the weights: if i is better than bpi,
 			// it becomes the best-child for its parent, and the parent is assigned the best-target of i
 			if gh.w[i] > gh.w[bpi] {
 				pp = gh.nodes[pi]
 				log.Printf("b[%d][%s] 0x%x (%d) => 0x%x (%d)\n", pi, pp.Key.String(), gh.b[pi], gh.b[pi]+gh.pruneidx, ui, ui+gh.pruneidx)
 				gh.b[pi] = ui
+				/*we set it ,so just do check again*/
 			}
 		}
 	}
