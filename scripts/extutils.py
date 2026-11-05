@@ -27,6 +27,54 @@ from tomlex import TomlEx
 from strop import rand_buffer,dump_buffer,parse_int
 
 
+class CmpObject(object):
+    def __init__(self):
+        return
+
+    def cmp_dict_raise(self,sdict,odict,note,raiseexp):
+        for k in sdict.keys():
+            if k not in odict.keys():
+                if raiseexp:
+                    raise Exception('%s self [%s] not in other'%(note,k))
+                return False
+            if sdict[k] != odict[k]:
+                if raiseexp:
+                    raise Exception('%s self [%s] [%s] != other [%s] [%s]'%(note,k,sdict[k],k,odict[k]))
+                return False
+
+        for k in odict.keys():
+            if k not in sdict.keys():
+                if raiseexp:
+                    raise Exception('%s other [%s] not in self'%(note,k))
+                return False
+            if sdict[k] != odict[k]:
+                if raiseexp:
+                    raise Exception('%s other [%s] [%s] != self [%s] [%s]'%(note,k,odict[k],k,sdict[k]))
+                return False
+        return True
+
+    def cmp_list_raise(self,sarr,oarr,note,raiseexp):
+        if sarr != oarr:
+            if raiseexp:
+                if len(sarr) != len(oarr):
+                    raise Exception('%s len (%d) != len (%d)'%(note,len(sarr),len(oarr)))
+                idx = 0
+                while idx < len(sarr):
+                    if sarr[idx] != oarr[idx]:
+                        raise Exception('%s [%d] [%d] != [%d]'%(note,idx,sarr[idx],oarr[idx]))
+                    idx += 1
+            return False
+        return True
+
+    def cmp_value_raise(self,sval,oval,note,raiseexp):
+        if sval != oval:
+            if raiseexp:
+                raise Exception('%s sval %s != oval %s'%(note,sval,oval))
+            return False
+        return True
+
+
+
 class LmdAttest(object):
     def __init__(self):
         self.key = ''
@@ -152,7 +200,7 @@ class DagNode(object):
 
 
 
-class LmdDagNode(object):
+class LmdDagNode(CmpObject):
     def __init__(self):
         self.lindex = -1
         self.idx = -1
@@ -178,33 +226,27 @@ class LmdDagNode(object):
         ret.set_bestchild(self.bestchild)
         return ret
 
-    def _cmp_value_raise(self,sval,oval,note,raiseexp):
-        if sval != oval:
-            if raiseexp:
-                raise Exception('%s sval %s != oval %s'%(note,sval,oval))
-            return False
-        return True
 
     def eq_op(self,other,raiseexp=False):
-        retval = self._cmp_value_raise(self.idx,other.idx,'idx',raiseexp)
+        retval = self.cmp_value_raise(self.idx,other.idx,'idx',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_value_raise(self.key,other.key,'key',raiseexp)
+        retval = self.cmp_value_raise(self.key,other.key,'key',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_value_raise(self.weight,other.weight,'weight',raiseexp)
+        retval = self.cmp_value_raise(self.weight,other.weight,'weight',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_value_raise(self.parent,other.parent,'parent',raiseexp)
+        retval = self.cmp_value_raise(self.parent,other.parent,'parent',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_value_raise(self.ishead,other.ishead,'ishead',raiseexp)
+        retval = self.cmp_value_raise(self.ishead,other.ishead,'ishead',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_value_raise(self.slot,other.slot,'slot',raiseexp)
+        retval = self.cmp_value_raise(self.slot,other.slot,'slot',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_value_raise(self.bestchild,other.bestchild,'bestchild',raiseexp)
+        retval = self.cmp_value_raise(self.bestchild,other.bestchild,'bestchild',raiseexp)
         if not retval:
             return False
         return True
@@ -267,14 +309,14 @@ class LmdDagNode(object):
         self.bestchild = bestchild
         return
 
-class LmdDagTree(object):
+class LmdDagTree(CmpObject):
     def __init__(self,lindex):
         self.rdict = dict()
         self.childmap = dict()
         self.idxdict = dict()
         self.ridxdict = dict()
         self.lindex = lindex
-        self.root = None
+        self.root = None        
         return
 
     def set_node(self,key,dag):
@@ -310,7 +352,64 @@ class LmdDagTree(object):
                 idx += 1
         return None
 
+    def cmp_child_map(self,scmap,ocmap,note,raiseexp):
+        for k in scmap.keys():
+            if k not in ocmap.keys():
+                if raiseexp:
+                    raise Exception('%s key [%s] not in ocmap'%(note,k))
+                return False
+            sarr = scmap[k]
+            oarr = ocmap[k]
+            if len(sarr) != len(oarr):
+                if raiseexp:
+                    raise Exception('%s key [%s] scmap len(%d) != ocmap len(%d)'%(note,k,len(sarr),len(oarr)))
+                return False
+            idx = 0
+            while idx < len(sarr):
+                if sarr[idx] not in oarr:
+                    if raiseexp:
+                        raise Exception('%s key [%s] sarr[%d] val [%s] not in ocmap %s'%(note,k,idx,sarr[idx],oarr))
+                    return False
+                idx += 1
+        for k in ocmap.keys():
+            if k not in scmap.keys():
+                if raiseexp:
+                    raise Exception('%s key [%s] not in scmap'%(note,k))
+                return False
+            sarr = scmap[k]
+            oarr = ocmap[k]
+            if len(sarr) != len(oarr):
+                if raiseexp:
+                    raise Exception('%s key [%s] scmap len(%d) != ocmap len(%d)'%(note,k,len(sarr),len(oarr)))
+                return False
+            idx = 0
+            while idx < len(oarr):
+                if oarr[idx] not in sarr:
+                    if raiseexp:
+                        raise Exception('%s key [%s] oarr[%d] val [%s] not in scmap %s'%(note,k,idx,oarr[idx],sarr))
+                    return False
+                idx += 1
+        return True
+
+
+
     def eq_op(self,other,raiseexp=False):
+        retval = self.cmp_dict_raise(self.rdict,other.rdict,'rdict',raiseexp)
+        if not retval:
+            return False
+        retval = self.cmp_child_map(self.childmap,other.childmap,'childmap',raiseexp)
+        if not retval:
+            return False
+        retval = self.cmp_dict_raise(self.idxdict,other.idxdict,'idxdict',raiseexp)
+        if not retval:
+            return False
+        retval = self.cmp_dict_raise(self.ridxdict,other.ridxdict,'ridxdict',raiseexp)
+        if not retval:
+            return False
+        retval = self.cmp_value_raise(self.root,other.root,'root',raiseexp)
+        if not retval:
+            return False
+        return True
 
     def __eq__(self,other):
         return self.eq_op(other,False)
@@ -362,7 +461,7 @@ class LmdDagTree(object):
             curdag = self.rdict[chldkey]
 
 
-class ProtoArrayLMDGhost(object):
+class ProtoArrayLMDGhost(CmpObject):
     def __init__(self):
         self.lindex = -1
         self.weights = []
@@ -384,61 +483,26 @@ class ProtoArrayLMDGhost(object):
         retgh.set_targets(self.targets)
         return retgh
 
-    def _cmp_list_raise(self,sarr,oarr,note,raiseexp):
-        if sarr != oarr:
-            if raiseexp:
-                if len(sarr) != len(oarr):
-                    raise Exception('%s len (%d) != len (%d)'%(note,len(sarr),len(oarr)))
-                idx = 0
-                while idx < len(sarr):
-                    if sarr[idx] != oarr[idx]:
-                        raise Exception('%s [%d] [%d] != [%d]'%(note,idx,sarr[idx],oarr[idx]))
-                    idx += 1
-            return False
-        return True
-
-    def _cmp_dict_raise(self,sdict,odict,note,raiseexp):
-        for k in sdict.keys():
-            if k not in odict.keys():
-                if raiseexp:
-                    raise Exception('%s self [%s] not in other'%(note,k))
-                return False
-            if sdict[k] != odict[k]:
-                if raiseexp:
-                    raise Exception('%s self [%s] [%s] != other [%s] [%s]'%(note,k,sdict[k],k,odict[k]))
-                return False
-
-        for k in odict.keys():
-            if k not in sdict.keys():
-                if raiseexp:
-                    raise Exception('%s other [%s] not in self'%(note,k))
-                return False
-            if sdict[k] != odict[k]:
-                if raiseexp:
-                    raise Exception('%s other [%s] [%s] != self [%s] [%s]'%(note,k,odict[k],k,sdict[k]))
-                return False
-        return True
-
         
 
 
     def eq_op(self,other,raiseexp=False):
-        retval = self._cmp_list_raise(self.weights,other.weights,'weights',raiseexp)
+        retval = self.cmp_list_raise(self.weights,other.weights,'weights',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_list_raise(self.bestchilds,other.bestchilds,'bestchilds',raiseexp)
+        retval = self.cmp_list_raise(self.bestchilds,other.bestchilds,'bestchilds',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_dict_raise(self.indices,other.indices,'indices',raiseexp)
+        retval = self.cmp_dict_raise(self.indices,other.indices,'indices',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_list_raise(self.nodes,other.nodes,'nodes',raiseexp)
+        retval = self.cmp_list_raise(self.nodes,other.nodes,'nodes',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_list_raise(self.targets,other.targets,'targets',raiseexp)
+        retval = self.cmp_list_raise(self.targets,other.targets,'targets',raiseexp)
         if not retval:
             return False
-        retval = self._cmp_list_raise(self.parents,other.parents,'parents',raiseexp)
+        retval = self.cmp_list_raise(self.parents,other.parents,'parents',raiseexp)
         if not retval:
             return False
         return True
