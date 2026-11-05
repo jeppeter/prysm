@@ -316,7 +316,7 @@ class LmdDagTree(CmpObject):
         self.idxdict = dict()
         self.ridxdict = dict()
         self.lindex = lindex
-        self.root = None        
+        self.root = None
         return
 
     def set_node(self,key,dag):
@@ -629,6 +629,15 @@ class ParseProtoArray(object):
                 self.protoarray.set_weights(m[0])
                 passed += 1
                 continue
+            m = parentexpr.findall(l)
+            if m is not None and len(m) > 0:
+                if self.protoarray is None:
+                    self.protoarray = ProtoArrayLMDGhost()
+                    self.protoarray.set_lindex(lindex)
+                self.protoarray.set_parents(m[0])
+                passed += 1
+                continue
+
 
 
             
@@ -1033,7 +1042,36 @@ class EvmRun(object):
         self.dagtree = None
         return
 
-    def check_protoarray(self,protoarray):
+    def apply_protoarray(self,protoarray):
+        if self.protoarray is None:
+            self.protoarray = protoarray.deep_copy()
+            return True
+        retval = False
+        try:
+            self.protoarray.eq_op(protoarray,True)
+            retval = True
+        except:
+            logging.error('%s'%(traceback.format_exc()))
+        return retval
+
+    def apply_score_change(self,scorechange):
+        if self.protoarray is None:
+            # nothing to apply
+            return True
+        # now to set the score change 
+        return True
+
+    def apply_new_node(self,node):
+        if self.protoarray is None:
+            return True
+        # now to append the proto
+        return True
+
+    def apply_att_map(self,attmap):
+        return True
+
+    def apply_dag_tree(self,dagtree):
+        return True
 
 
 
@@ -1116,10 +1154,29 @@ class ProcessChange(object):
                 lindex = curscore.parse(lindex,sarr)
                 self.procs.extend(curscore.scorechanges)
                 continue
-
-
             lindex += 1
         return
+
+    def check_run(self):
+        idx = 0
+        evm = EvmRun()
+        while idx < len(self.procs):
+            curobj = self.procs[idx]
+            if isinstance(curobj,LmdAttest):
+                retval = evm.apply_att_map(curobj)
+            elif isinstance(curobj,LmdDagTree):
+                retval = evm.apply_dag_tree(curobj)
+            elif isinstance(curobj,DagNode):
+                retval = evm.apply_new_node(curobj)
+            elif isinstance(curobj,ScoreChange):
+                retval = evm.apply_score_change(curobj)
+            elif isinstance(curobj,ParseProtoArray):
+                retval = evm.apply_protoarray(curobj)
+            else:
+                raise Exception('unknow type of curobj %s'%(curobj))
+            if not retval:
+                logging.error('run error on [%d] object'%(curobj.lindex))
+            idx += 1
 
 
 
