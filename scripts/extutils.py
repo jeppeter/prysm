@@ -665,7 +665,7 @@ class LmdPair(object):
                 return True
             for (k,v) in nwdict.items():
                 self.errors.append('[%d] [%s] = [%d]'%(self.dagtree.lindex,k,v))
-            self.errors.append('[%d] key %s has childs'%(self.dagtree.lindex,curdag.key))
+            self.errors.append('[%d] key %s no childs'%(self.dagtree.lindex,curdag.key))
             return False
         chlds = self.dagtree.childmap[curdag.key]
         # now to make sure the values

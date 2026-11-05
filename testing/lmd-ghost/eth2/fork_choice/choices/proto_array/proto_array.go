@@ -264,7 +264,7 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 			// it becomes the best-child for its parent, and the parent is assigned the best-target of i
 			if gh.w[i] > gh.w[bpi] {
 				pp = gh.nodes[pi]
-				log.Printf("b[%d][%s] 0x%x => 0x%x\n", pi, pp.Key.String(), gh.b[pi], ui)
+				log.Printf("b[%d][%s] 0x%x (%d) => 0x%x (%d)\n", pi, pp.Key.String(), gh.b[pi], gh.b[pi]+gh.pruneidx, ui, ui+gh.pruneidx)
 				gh.b[pi] = ui
 			}
 		}
@@ -372,10 +372,10 @@ func (gh *ProtoArrayLMDGhost) innerhead() *dag.DagNode {
 func (gh *ProtoArrayLMDGhost) HeadFn() *dag.DagNode {
 	// look up the index of the finalized node, this is our starting point
 	i := gh.indices[gh.dag.Finalized]
-	log.Printf("SearchHead start %d\n", i)
+	log.Printf("SearchHead start %d\n", i+gh.pruneidx)
 	for {
 		if bi := gh.b[i]; bi != nonExistentNode {
-			log.Printf("SearchHead i %d => bi %d\n", i, bi)
+			log.Printf("SearchHead i %d => bi %d\n", i+gh.pruneidx, bi+gh.pruneidx)
 			i = bi
 		} else {
 			break
