@@ -154,6 +154,7 @@ class DagNode(object):
 
 class LmdDagNode(object):
     def __init__(self):
+        self.lindex = -1
         self.idx = -1
         self.key = ''
         self.weight = -1
@@ -161,21 +162,69 @@ class LmdDagNode(object):
         self.besttarget = -1
         self.ishead = False
         self.slot = -1
-        self.lindex = -1
         self.bestchild = -1
         return
 
     def deep_copy(self):
         ret = LmdDagNode()
         ret.set_lindex(self.lindex)
+        ret.set_idx(self.idx)
         ret.set_key(self.key)
         ret.set_weight(self.weight)
+        ret.set_parent(self.parent)
+        ret.set_besttarget(self.besttarget)
+        ret.set_ishead(self.ishead)
+        ret.set_slot(self.slot)
+        ret.set_bestchild(self.bestchild)
+        return ret
+
+    def _cmp_value_raise(self,sval,oval,note,raiseexp):
+        if sval != oval:
+            if raiseexp:
+                raise Exception('%s sval %s != oval %s'%(note,sval,oval))
+            return False
+        return True
+
+    def eq_op(self,other,raiseexp=False):
+        retval = self._cmp_value_raise(self.idx,other.idx,'idx',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_value_raise(self.key,other.key,'key',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_value_raise(self.weight,other.weight,'weight',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_value_raise(self.parent,other.parent,'parent',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_value_raise(self.ishead,other.ishead,'ishead',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_value_raise(self.slot,other.slot,'slot',raiseexp)
+        if not retval:
+            return False
+        retval = self._cmp_value_raise(self.bestchild,other.bestchild,'bestchild',raiseexp)
+        if not retval:
+            return False
+        return True
+
+
+    def __eq__(self,other):
+        return self.eq_op(other,False)
+
+    def __ne__(self,other):
+        return not self.eq_op(other,False)
 
     def set_lindex(self,lindex):
         self.lindex = lindex
         return
     def set_key(self,key):
         self.key = key
+        return
+
+    def set_idx(self,idx):
+        self.idx = idx
         return
 
     def set_weight(self,weight):
@@ -259,8 +308,15 @@ class LmdDagTree(object):
                 if retval is not None:
                     return retval
                 idx += 1
-
         return None
+
+    def eq_op(self,other,raiseexp=False):
+
+    def __eq__(self,other):
+        return self.eq_op(other,False)
+
+    def __ne__(self,other):
+        return not self.eq_op(other,False)
 
 
     def get_head_node(self,parentkey):
