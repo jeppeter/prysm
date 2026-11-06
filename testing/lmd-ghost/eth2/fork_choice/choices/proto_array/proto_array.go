@@ -185,19 +185,19 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 	// These diff values can be propagated first, and then applied to the weights after.
 	// This makes it easy to recognize when a "change" cancels out somewhere:
 	//  the diff value will be 0, just like any non-change.
-	for _, c := range changes {
-		log.Printf("ApplyScoreChanges.ScoreChange %s\n", c.String())
-	}
+	//for _, c := range changes {
+	//	log.Printf("ApplyScoreChanges.ScoreChange %s\n", c.String())
+	//}
 
-	log.Printf("Start ApplyScoreChanges len(%d)\n", len(changes))
+	//log.Printf("Start ApplyScoreChanges len(%d)\n", len(changes))
 	d := make([]int64, len(gh.nodes), len(gh.nodes))
 	start := int64(gh.indices[gh.dag.Finalized])
-	var pp *dag.DagNode
-	var cnode *dag.DagNode
+	//var pp *dag.DagNode
+	//var cnode *dag.DagNode
 	for _, c := range changes {
 		i, ok := gh.indices[c.Target]
 		if ok {
-			log.Printf("d[%d][%s] 0x%x => 0x%x\n", i, c.Target.Key.String(), d[i], d[i]+c.ScoreDelta)
+			//log.Printf("d[%d][%s] 0x%x => 0x%x\n", i, c.Target.Key.String(), d[i], d[i]+c.ScoreDelta)
 			d[i] += c.ScoreDelta
 		}
 	}
@@ -208,9 +208,9 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 			continue
 		}
 		if pi != 0 {
-			cnode = gh.nodes[pi]
-			pp = gh.nodes[i]
-			log.Printf("d[%d][%s] 0x%x => 0x%x (d[%d][%s])\n", pi, cnode.Key.String(), d[pi], d[pi]+d[i], i, pp.Key.String())
+			//cnode = gh.nodes[pi]
+			//pp = gh.nodes[i]
+			//log.Printf("d[%d][%s] 0x%x => 0x%x (d[%d][%s])\n", pi, cnode.Key.String(), d[pi], d[pi]+d[i], i, pp.Key.String())
 			d[pi] += d[i]
 		}
 	}
@@ -218,8 +218,8 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 	// (note: array ADD, doesn't have to be a loop)
 	for i, v := range d {
 		if v != 0 {
-			pp = gh.nodes[i]
-			log.Printf("w[%d][%s] 0x%x => 0x%x [v 0x%x]\n", i, pp.Key.String(), gh.w[i], gh.w[i]+v, v)
+			//pp = gh.nodes[i]
+			//log.Printf("w[%d][%s] 0x%x => 0x%x [v 0x%x]\n", i, pp.Key.String(), gh.w[i], gh.w[i]+v, v)
 			gh.w[i] += v
 		}
 	}
@@ -241,8 +241,8 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 		bpi := gh.b[pi]
 		if bpi == nonExistentNode {
 			// i is better than nothing, easy
-			pp = gh.nodes[pi]
-			log.Printf("b[%d][%s] 0x%x => 0x%x\n", pi, pp.Key.String(), gh.b[pi], ui)
+			//pp = gh.nodes[pi]
+			//log.Printf("b[%d][%s] 0x%x => 0x%x\n", pi, pp.Key.String(), gh.b[pi], ui)
 			gh.b[pi] = ui
 			continue
 		}
@@ -266,8 +266,8 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 			// now look at the weights: if i is better than bpi,
 			// it becomes the best-child for its parent, and the parent is assigned the best-target of i
 			if gh.w[i] > gh.w[bpi] {
-				pp = gh.nodes[pi]
-				log.Printf("b[%d][%s] 0x%x (%d) => 0x%x (%d)\n", pi, pp.Key.String(), gh.b[pi], gh.b[pi]+gh.pruneidx, ui, ui+gh.pruneidx)
+				//pp = gh.nodes[pi]
+				//log.Printf("b[%d][%s] 0x%x (%d) => 0x%x (%d)\n", pi, pp.Key.String(), gh.b[pi], gh.b[pi]+gh.pruneidx, ui, ui+gh.pruneidx)
 				gh.b[pi] = ui
 				/*we set it ,so just do check again*/
 			}
@@ -277,13 +277,13 @@ func (gh *ProtoArrayLMDGhost) ApplyScoreChanges(changes []dag.ScoreChange) {
 	for i := int64(len(d)) - 1; i >= start; i-- {
 		// propagate best-target
 		if bi := gh.b[i]; bi != nonExistentNode {
-			pp = gh.nodes[i]
-			cnode = gh.nodes[bi]
-			log.Printf("t[%d][%s] 0x%x => 0x%x (t[%d][%s])\n", i, pp.Key.String(), gh.t[i], gh.t[bi], bi, cnode.Key.String())
+			//pp = gh.nodes[i]
+			//cnode = gh.nodes[bi]
+			//log.Printf("t[%d][%s] 0x%x => 0x%x (t[%d][%s])\n", i, pp.Key.String(), gh.t[i], gh.t[bi], bi, cnode.Key.String())
 			gh.t[i] = gh.t[bi]
 		}
 	}
-	log.Printf("End ApplyScoreChanges\n")
+	//log.Printf("End ApplyScoreChanges\n")
 	//gh.PrintState("ApplyScoreChanges")
 }
 
@@ -376,10 +376,10 @@ func (gh *ProtoArrayLMDGhost) innerhead() *dag.DagNode {
 func (gh *ProtoArrayLMDGhost) HeadFn() *dag.DagNode {
 	// look up the index of the finalized node, this is our starting point
 	i := gh.indices[gh.dag.Finalized]
-	log.Printf("SearchHead start %d\n", i+gh.pruneidx)
+	//log.Printf("SearchHead start %d\n", i+gh.pruneidx)
 	for {
 		if bi := gh.b[i]; bi != nonExistentNode {
-			log.Printf("SearchHead i %d => bi %d\n", i+gh.pruneidx, bi+gh.pruneidx)
+			//log.Printf("SearchHead i %d => bi %d\n", i+gh.pruneidx, bi+gh.pruneidx)
 			i = bi
 		} else {
 			break

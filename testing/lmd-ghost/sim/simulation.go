@@ -123,7 +123,7 @@ func (s *Simulation) SimNewBlock() {
 
 	// create the block
 	bl := &block.BeaconBlock{ParentHash: parentBlock.Key, Hash: blockHash, Proposer: proposer, Slot: blockSlot}
-	log.Printf("NewBlock %s\n", bl.String())
+	//log.Printf("NewBlock %s\n", bl.String())
 
 	// add it to the chain
 	if err := s.Chain.BlockIn(bl); err != nil {
@@ -156,7 +156,7 @@ func (s *Simulation) SimNewAttestation() {
 
 	// make the attestation happen
 	at := &attestation.Attestation{BeaconBlockRoot: target.Key, Attester: attester, Weight: uint64(weight)}
-	log.Printf("new Attestation %s\n", at.String())
+	//log.Printf("new Attestation %s\n", at.String())
 	if err := s.Chain.AttestationIn(at); err != nil {
 		panic("Could not insert simulated attestation")
 	}
@@ -188,7 +188,7 @@ func (s *Simulation) RunSim() {
 		/*we update head for it will give ok*/
 		s.Chain.UpdateHead()
 		head := s.Chain.Dag.Nodes[s.Chain.Head]
-		log.Printf("[%d] head %s\n", n, head.String())
+		//log.Printf("[%d] head %s\n", n, head.String())
 		epoch := head.Slot / s.Config.EpochLength
 		if epoch > s.Config.FinalizeEpochsAgo {
 			log.Printf("epoch 0x%x > FinalizeEpochsAgo 0x%x\n", epoch, s.Config.FinalizeEpochsAgo)
@@ -237,14 +237,14 @@ func (s *Simulation) RunSim() {
 			}
 		}
 		if epoch > s.Config.JustifyEpochsAgo {
-			log.Printf("epoch 0x%x > JustifyEpochsAgo 0x%x\n", epoch, s.Config.JustifyEpochsAgo)
+			//log.Printf("epoch 0x%x > JustifyEpochsAgo 0x%x\n", epoch, s.Config.JustifyEpochsAgo)
 			justifiedEpoch := epoch - s.Config.JustifyEpochsAgo
-			log.Printf("justifiedEpoch %d s.Chain.Dag.Justified.Slot(%d)/s.Config.EpochLength(%d) %d \n", justifiedEpoch, s.Chain.Dag.Justified.Slot, s.Config.EpochLength, s.Chain.Dag.Justified.Slot/s.Config.EpochLength)
+			//log.Printf("justifiedEpoch %d s.Chain.Dag.Justified.Slot(%d)/s.Config.EpochLength(%d) %d \n", justifiedEpoch, s.Chain.Dag.Justified.Slot, s.Config.EpochLength, s.Chain.Dag.Justified.Slot/s.Config.EpochLength)
 			if justifiedEpoch > s.Chain.Dag.Justified.Slot/s.Config.EpochLength {
-				log.Printf("justifiedEpoch 0x%x > 0x%x\n", justifiedEpoch, s.Chain.Dag.Justified.Slot/s.Config.EpochLength)
+				//log.Printf("justifiedEpoch 0x%x > 0x%x\n", justifiedEpoch, s.Chain.Dag.Justified.Slot/s.Config.EpochLength)
 				j := head
 				for j != nil && j.Slot/s.Config.EpochLength > justifiedEpoch {
-					log.Printf("j %s (j.Slot (%d) / s.Config.EpochLength(%d)) >  justifiedEpoch 0x%x\n", j.String(), j.Slot, s.Config.EpochLength, justifiedEpoch)
+					//log.Printf("j %s (j.Slot (%d) / s.Config.EpochLength(%d)) >  justifiedEpoch 0x%x\n", j.String(), j.Slot, s.Config.EpochLength, justifiedEpoch)
 					j = j.Parent
 				}
 				if j != nil && j != s.Chain.Dag.Justified {

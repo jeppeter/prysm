@@ -106,7 +106,7 @@ func (dag *BeaconDag) Finalize(blockHash common.Hash256) {
 func (dag *BeaconDag) SyncChanges() {
 	// Find all the changes made in the aggregator and apply them to the DAG.
 	changes := make([]ScoreChange, 0)
-	log.Printf("Start SyncChanges\n")
+	//log.Printf("Start SyncChanges\n")
 	for k, v := range dag.agor.LatestAggregates {
 		if v.PrevWeight != v.Weight {
 			// get delta
@@ -119,7 +119,7 @@ func (dag *BeaconDag) SyncChanges() {
 	}
 	dag.ForkChoice.ApplyScoreChanges(changes)
 	dag.synced = true
-	log.Printf("End SyncChanges\n")
+	//log.Printf("End SyncChanges\n")
 }
 
 func (dag *BeaconDag) HeadFn() common.Hash256 {

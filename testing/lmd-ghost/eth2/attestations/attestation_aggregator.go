@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"lmd-ghost/eth2/attestations/attestation"
 	"lmd-ghost/eth2/common"
-	"log"
+	//"log"
 )
 
 type SlotLookupFn func(blockHash common.Hash256) (uint64, bool)
@@ -77,7 +77,7 @@ func (agor *AttestationsAggregator) createAgIfNonExists(key common.Hash256) *Agg
 	// check if we have to create a new aggregate
 	if !knownAg {
 		newAg = NewAggregatedAttestation(key)
-		log.Printf("createAgIfNonExists %s\n", newAg.String())
+		//log.Printf("createAgIfNonExists %s\n", newAg.String())
 		agor.LatestAggregates[key] = newAg
 	}
 	return newAg
@@ -85,7 +85,7 @@ func (agor *AttestationsAggregator) createAgIfNonExists(key common.Hash256) *Agg
 
 func (agor *AttestationsAggregator) AttestationIn(atIn *attestation.Attestation) {
 	prevContrib, hasPrevContrib := agor.LatestTargets[atIn.Attester]
-	log.Printf("atIn %s hasPrevContrib %v\n", atIn.String(), hasPrevContrib)
+	//log.Printf("atIn %s hasPrevContrib %v\n", atIn.String(), hasPrevContrib)
 	if hasPrevContrib {
 
 		prevAg := agor.LatestAggregates[prevContrib.BeaconBlockRoot]

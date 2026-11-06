@@ -3,7 +3,7 @@ package storage
 import (
 	"lmd-ghost/eth2/block"
 	"lmd-ghost/eth2/common"
-	"log"
+	//"log"
 )
 
 // / Very simple storage, to abstract away block-storage from the implementation,
@@ -23,7 +23,7 @@ func (st *BeaconStorage) GetBlock(blockHash common.Hash256) (*block.BeaconBlock,
 }
 
 func (st *BeaconStorage) PutBlock(block *block.BeaconBlock) error {
-	log.Printf("PutBlock %s\n", block.String())
+	//log.Printf("PutBlock %s\n", block.String())
 	st.blocks[block.Hash] = block
 	return nil
 }

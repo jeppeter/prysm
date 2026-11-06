@@ -9,6 +9,7 @@ type RandFile struct {
 	fp     *os.File
 	path   string
 	bclose bool
+	totaln uint64
 }
 
 func (retp *RandFile) Close() {
@@ -17,6 +18,7 @@ func (retp *RandFile) Close() {
 	}
 	retp.fp = nil
 	retp.bclose = false
+	retp.totaln = 0
 }
 
 func NewRandFp(fp *os.File, note string) (retp *RandFile, err error) {
@@ -24,6 +26,7 @@ func NewRandFp(fp *os.File, note string) (retp *RandFile, err error) {
 	retp.fp = fp
 	retp.path = note
 	retp.bclose = false
+	retp.totaln = 0
 	err = nil
 	return
 }
@@ -63,6 +66,11 @@ func (retp *RandFile) Int63() (retv int64) {
 		retv <<= 8
 		retv |= int64(v)
 	}
+
+	if retv < 0 {
+		retv = -retv
+	}
+	retp.totaln += 8
 	return
 }
 
@@ -87,6 +95,7 @@ func (retp *RandFile) Uint64() (retv uint64) {
 		retv <<= 8
 		retv |= uint64(v)
 	}
+	retp.totaln += 8
 	return
 }
 
