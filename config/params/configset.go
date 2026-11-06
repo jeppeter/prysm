@@ -35,7 +35,7 @@ func SetActive(c *BeaconChainConfig) error {
 	var err error
 	outb, err = yaml.Marshal(c)
 	if err == nil {
-		log.Infof("SetActive BeaconChainConfig\n%s", string(outb))
+		log.Tracef("SetActive BeaconChainConfig\n%s", string(outb))
 	}
 	return configs.setActive(c)
 }
