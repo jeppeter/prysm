@@ -209,6 +209,8 @@ def compile_bin(args,d):
         cmds = []
         cmds.append(get_go_cmd())
         cmds.append('build')
+        if args.force:
+            cmds.append('-a')
         cmds.append('-o')
         if is_windows():
             outf = '.\\cmd\\%s\\%s.exe'%(d,d)
