@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -122,6 +123,8 @@ func Test_pruneAttsFromPool_Electra(t *testing.T) {
 		},
 		Signature: make([]byte, 96),
 	}
+	outb, _ := json.Marshal(bl)
+	debuglog.Testf("SignedBeaconBlockElectra\n%s", string(outb))
 	rob, err := consensusblocks.NewSignedBeaconBlock(bl)
 	require.NoError(t, err)
 	st, _ := util.DeterministicGenesisStateElectra(t, 1024)
