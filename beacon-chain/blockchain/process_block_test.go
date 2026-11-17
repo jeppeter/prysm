@@ -41,6 +41,7 @@ import (
 	"github.com/OffchainLabs/prysm/v7/genesis"
 	enginev1 "github.com/OffchainLabs/prysm/v7/proto/engine/v1"
 	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	debuglog "github.com/OffchainLabs/prysm/v7/runtime/debug"
 	"github.com/OffchainLabs/prysm/v7/runtime/version"
 	"github.com/OffchainLabs/prysm/v7/testing/assert"
 	"github.com/OffchainLabs/prysm/v7/testing/require"
@@ -56,6 +57,8 @@ import (
 func Test_pruneAttsFromPool_Electra(t *testing.T) {
 	ctx := t.Context()
 	logHook := logTest.NewGlobal()
+
+	debuglog.Testf("Test_pruneAttsFromPool_Electra Enter")
 
 	params.SetupTestConfigCleanup(t)
 	cfg := params.BeaconConfig().Copy()
