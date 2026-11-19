@@ -2,7 +2,6 @@ package blockchain
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Code-Hex/dd"
 	"github.com/OffchainLabs/go-bitfield"
 	mock "github.com/OffchainLabs/prysm/v7/beacon-chain/blockchain/testing"
 	"github.com/OffchainLabs/prysm/v7/beacon-chain/cache"
@@ -123,12 +123,13 @@ func Test_pruneAttsFromPool_Electra(t *testing.T) {
 		},
 		Signature: make([]byte, 96),
 	}
-	outb, _ := json.Marshal(bl)
-	debuglog.Testf("SignedBeaconBlockElectra\n%s", string(outb))
+
+	debuglog.Testf("bl\n%s", dd.Dump(bl, dd.WithIndent(4)))
 	rob, err := consensusblocks.NewSignedBeaconBlock(bl)
-	debuglog.Testf("rob %p err %p", rob, err)
-	outb, _ = json.Marshal(rob)
-	debuglog.Testf("BeaconBlock\n%s", string(outb))
+	if err == nil {
+		debuglog.Testf("rob\n%s", dd.Dump(rob, dd.WithIndent(4)))
+	}
+
 	require.NoError(t, err)
 	st, _ := util.DeterministicGenesisStateElectra(t, 1024)
 	require.NoError(t, helpers.UpdateCommitteeCache(ctx, st, 0))

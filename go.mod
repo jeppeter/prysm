@@ -3,6 +3,7 @@ module github.com/OffchainLabs/prysm/v7
 go 1.26.5
 
 require (
+	github.com/Code-Hex/dd v1.3.0
 	github.com/OffchainLabs/go-bitfield v0.0.0-20260504143531-5cbb6d0f5f2e
 	github.com/OffchainLabs/hashtree v0.2.3
 	github.com/OffchainLabs/methodical-ssz v0.0.0-20260703104215-9be4f5c6a334
