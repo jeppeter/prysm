@@ -1,12 +1,14 @@
 package blocks
 
 import (
+	"encoding/json"
 	"fmt"
 
 	consensus_types "github.com/OffchainLabs/prysm/v7/consensus-types"
 	"github.com/OffchainLabs/prysm/v7/encoding/bytesutil"
 	enginev1 "github.com/OffchainLabs/prysm/v7/proto/engine/v1"
 	eth "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
+	debuglog "github.com/OffchainLabs/prysm/v7/runtime/debug"
 	"github.com/OffchainLabs/prysm/v7/runtime/version"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
@@ -1248,11 +1250,17 @@ func initSignedBlockFromProtoElectra(pb *eth.SignedBeaconBlockElectra) (*SignedB
 	if err != nil {
 		return nil, err
 	}
+	outb, ccerr := json.Marshal(block)
+	if ccerr == nil {
+		debuglog.Testf("block\n%s", string(outb))
+	}
+
 	b := &SignedBeaconBlock{
 		version:   version.Electra,
 		block:     block,
 		signature: bytesutil.ToBytes96(pb.Signature),
 	}
+
 	return b, nil
 }
 
@@ -1278,6 +1286,11 @@ func initBlockFromProtoElectra(pb *eth.BeaconBlockElectra) (*BeaconBlock, error)
 		return nil, errNilBlock
 	}
 
+	outb, ccerr := json.Marshal(pb)
+	if ccerr == nil {
+		debuglog.Testf("pb BeaconBlockElectra\n%s", string(outb))
+	}
+
 	body, err := initBlockBodyFromProtoElectra(pb.Body)
 	if err != nil {
 		return nil, err
@@ -1298,6 +1311,11 @@ func initBlindedBlockFromProtoElectra(pb *eth.BlindedBeaconBlockElectra) (*Beaco
 		return nil, errNilBlock
 	}
 
+	outb, ccerr := json.Marshal(pb)
+	if ccerr == nil {
+		debuglog.Testf("pb BlindedBeaconBlockElectra\n%s", string(outb))
+	}
+
 	body, err := initBlindedBlockBodyFromProtoElectra(pb.Body)
 	if err != nil {
 		return nil, err
@@ -1315,12 +1333,14 @@ func initBlindedBlockFromProtoElectra(pb *eth.BlindedBeaconBlockElectra) (*Beaco
 
 func initBlockBodyFromProtoElectra(pb *eth.BeaconBlockBodyElectra) (*BeaconBlockBody, error) {
 	if pb == nil {
+		debuglog.Testf("pb == nil")
 		return nil, errNilBlockBody
 	}
 
 	p, err := WrappedExecutionPayloadDeneb(pb.ExecutionPayload)
 	// We allow the payload to be nil
 	if err != nil && !errors.Is(err, consensus_types.ErrNilObjectWrapped) {
+		debuglog.Testf("return error %s", err.Error())
 		return nil, err
 	}
 	er := pb.ExecutionRequests
@@ -1486,6 +1506,10 @@ func initBlockBodyFromProtoFulu(pb *eth.BeaconBlockBodyElectra) (*BeaconBlockBod
 		blsToExecutionChanges:    pb.BlsToExecutionChanges,
 		blobKzgCommitments:       pb.BlobKzgCommitments,
 		executionRequests:        er,
+	}
+	outb, ccerr := json.Marshal(b)
+	if ccerr == nil {
+		debuglog.Testf("BeaconBlockBody\n%s", string(outb))
 	}
 	return b, nil
 }
